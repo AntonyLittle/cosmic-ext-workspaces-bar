@@ -1,0 +1,30 @@
+[package]
+name = "cosmic-ext-workspaces-bar"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "A bar showing live workspace previews for the COSMIC desktop"
+
+[dependencies]
+calloop = "0.14.4"
+calloop-wayland-source = "0.4.1"
+env_logger = "0.11"
+log = "0.4"
+memmap2 = "0.9"
+rustix = { version = "1.1", features = ["fs", "shm"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["time"] }
+
+# Pinned to the same revision cosmic-workspaces-epoch builds against
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "8cb10bf6e24b86a7d2a9cf8c662d3e0154db1b21"
+default-features = false
+features = ["tokio", "wayland", "winit", "multi-window", "single-instance", "wgpu"]
+
+[dependencies.cosmic-config]
+git = "https://github.com/pop-os/libcosmic"
+rev = "8cb10bf6e24b86a7d2a9cf8c662d3e0154db1b21"
+
+[profile.release]
+lto = "thin"

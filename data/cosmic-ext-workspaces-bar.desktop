@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Workspaces Bar
+Comment=Bar with live workspace previews for the COSMIC desktop
+Exec=cosmic-ext-workspaces-bar
+Terminal=false
+Type=Application
+NoDisplay=true
+Categories=Utility;
+X-CosmicApplet=false
