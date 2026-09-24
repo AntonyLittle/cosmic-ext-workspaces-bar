@@ -13,6 +13,7 @@ use cosmic::iced::futures::{FutureExt, SinkExt};
 use cosmic::iced::{self};
 
 use cctk::screencopy::{CaptureSource, Rect, ScreencopyState};
+use cctk::sctk::dmabuf::DmabufState;
 use cctk::sctk::registry::{ProvidesRegistryState, RegistryState};
 use cctk::sctk::seat::{SeatHandler, SeatState};
 use cctk::sctk::shm::{Shm, ShmHandler};
@@ -37,6 +38,10 @@ mod buffer;
 use buffer::Buffer;
 mod capture;
 use capture::Capture;
+mod dmabuf;
+use dmabuf::DmabufDevices;
+mod gpu_downscale;
+use gpu_downscale::GpuDownscaler;
 mod screencopy;
 use screencopy::{ScreencopySession, SessionData};
 mod toplevel;
@@ -97,6 +102,10 @@ pub struct AppData {
     toplevel_info_state: ToplevelInfoState,
     toplevel_manager_state: Option<ToplevelManagerState>,
     seat: Option<wl_seat::WlSeat>,
+    dmabuf_state: DmabufState,
+    dmabuf_devices: DmabufDevices,
+    gpu_downscaler: Option<(libc::dev_t, GpuDownscaler)>,
+    gpu_downscaler_failed: bool,
 }
 
 impl AppData {
@@ -426,6 +435,10 @@ fn start(conn: Connection) -> mpsc::Receiver<Event> {
             toplevel_info_state: ToplevelInfoState::new(&registry_state, &qh),
             toplevel_manager_state: ToplevelManagerState::try_new(&registry_state, &qh),
             seat: None,
+            dmabuf_state: DmabufState::new(&globals, &qh),
+            dmabuf_devices: DmabufDevices::default(),
+            gpu_downscaler: None,
+            gpu_downscaler_failed: false,
             registry_state,
             seat_state: SeatState::new(&globals, &qh),
             shm_state: Shm::bind(&globals, &qh).unwrap(),

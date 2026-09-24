@@ -12,20 +12,75 @@ use cctk::screencopy::{
     ScreencopyFrameData, ScreencopyFrameDataExt, ScreencopyHandler, ScreencopySessionData,
     ScreencopySessionDataExt, ScreencopyState,
 };
+use cctk::wayland_client::protocol::wl_buffer;
 use cctk::wayland_client::{Connection, QueueHandle, WEnum};
 
 use std::array;
 use std::sync::{Arc, Weak};
 
+use super::dmabuf::DmabufBuffer;
 use super::{AppData, Buffer, CAPTURE_INTERVAL, Capture, Event, MAX_CAPTURE_INTERVAL};
 use crate::backend::CaptureImage;
 
 // We copy out of the buffer synchronously in `ready`, so one is enough
 const BUFFER_COUNT: usize = 1;
 
+// Either a plain shm buffer, or a GPU-allocated dmabuf one (stage 1: still
+// read back on the CPU, but this is the prerequisite for a GPU downscale in
+// a later stage). Falls back to `Shm` whenever dmabuf isn't usable.
+enum CaptureBuffer {
+    Shm(Buffer),
+    Dmabuf(DmabufBuffer),
+}
+
+impl CaptureBuffer {
+    fn wl_buffer(&self) -> &wl_buffer::WlBuffer {
+        match self {
+            CaptureBuffer::Shm(b) => &b.buffer,
+            CaptureBuffer::Dmabuf(b) => &b.buffer,
+        }
+    }
+
+    fn damage(&self) -> &[cctk::screencopy::Rect] {
+        match self {
+            CaptureBuffer::Shm(b) => &b.buffer_damage,
+            CaptureBuffer::Dmabuf(b) => &b.buffer_damage,
+        }
+    }
+
+    fn clear_damage(&mut self) {
+        match self {
+            CaptureBuffer::Shm(b) => b.buffer_damage.clear(),
+            CaptureBuffer::Dmabuf(b) => b.buffer_damage.clear(),
+        }
+    }
+
+    fn size(&self) -> (u32, u32) {
+        match self {
+            CaptureBuffer::Shm(b) => b.size,
+            CaptureBuffer::Dmabuf(b) => b.size,
+        }
+    }
+}
+
+impl AppData {
+    // Prefer a dmabuf-backed buffer when the compositor advertises one for
+    // this session; falls back to shm on any allocation failure
+    fn create_capture_buffer(&mut self, formats: &Formats) -> CaptureBuffer {
+        if let Some(device) = formats.dmabuf_device
+            && !formats.dmabuf_formats.is_empty()
+            && let Some(buf) =
+                self.create_dmabuf_buffer(device, &formats.dmabuf_formats, formats.buffer_size)
+        {
+            return CaptureBuffer::Dmabuf(buf);
+        }
+        CaptureBuffer::Shm(self.create_buffer(formats))
+    }
+}
+
 pub struct ScreencopySession {
     formats: Option<Formats>,
-    buffers: Option<[Buffer; BUFFER_COUNT]>,
+    buffers: Option<[CaptureBuffer; BUFFER_COUNT]>,
     session: CaptureSession,
     // adaptive throttle: grows while the workspace is idle
     interval: std::time::Duration,
@@ -76,8 +131,8 @@ impl ScreencopySession {
 
         self.in_flight = true;
         self.session.capture(
-            &back.buffer,
-            &back.buffer_damage,
+            back.wl_buffer(),
+            back.damage(),
             qh,
             FrameData {
                 frame_data: Default::default(),
@@ -136,7 +191,7 @@ impl ScreencopyHandler for AppData {
 
         // Create new buffer if none, then start capturing
         if session.buffers.is_none() {
-            session.buffers = Some(array::from_fn(|_| self.create_buffer(formats)));
+            session.buffers = Some(array::from_fn(|_| self.create_capture_buffer(formats)));
             session.attach_buffer_and_commit(&capture, conn, &self.qh);
         }
     }
@@ -164,13 +219,34 @@ impl ScreencopyHandler for AppData {
         }
 
         // Single reused buffer: after this copy it matches compositor state
-        session.buffers.as_mut().unwrap()[0].buffer_damage.clear();
+        session.buffers.as_mut().unwrap()[0].clear_damage();
 
         let bufs = session.buffers.as_ref().unwrap();
         let front = &bufs[0];
         // Downscale to preview resolution; all further work is on the small image
         let target = self.bar_filter.as_ref().map_or(512, |f| f.preview_px);
-        let (sw, sh, small) = downscale(front, target);
+        let (w, h) = front.size();
+        let dmabuf_device = session.formats.as_ref().and_then(|f| f.dmabuf_device);
+        let downscaled = match front {
+            CaptureBuffer::Shm(b) => Some(downscale(w, h, &b.mmap[..], w as usize * 4, target)),
+            CaptureBuffer::Dmabuf(b) => {
+                let gpu_result = dmabuf_device
+                    .and_then(|dev| self.gpu_downscaler(dev))
+                    .and_then(|gd| gd.downscale(b, target));
+                gpu_result.or_else(|| match b.with_pixels(|data, stride| {
+                    downscale(w, h, data, stride as usize, target)
+                }) {
+                    Ok(result) => Some(result),
+                    Err(err) => {
+                        log::warn!("dmabuf CPU readback fallback failed: {err}");
+                        None
+                    }
+                })
+            }
+        };
+        let Some((sw, sh, small)) = downscaled else {
+            return;
+        };
         // Crop out the configured reserved strips (own bar / all bars)
         let clip = self.clip_for(&capture.source, (sw, sh));
         let (sw, sh, small) = match clip {
@@ -248,7 +324,7 @@ impl ScreencopyHandler for AppData {
             };
             if let Some(formats) = &session.formats {
                 let formats = formats.clone();
-                session.buffers = Some(array::from_fn(|_| self.create_buffer(&formats)));
+                session.buffers = Some(array::from_fn(|_| self.create_capture_buffer(&formats)));
             }
             session.attach_buffer_and_commit(&capture, conn, &self.qh);
         } else {
@@ -288,19 +364,18 @@ impl AppData {
 
 cctk::delegate_screencopy!(AppData);
 
-/// Nearest-neighbor downscale to at most `target` px wide
-fn downscale(buf: &Buffer, target: u32) -> (u32, u32, Vec<u8>) {
-    let (w, h) = buf.size;
+/// Nearest-neighbor downscale to at most `target` px wide. `stride` is the
+/// source row stride in bytes, which may exceed `w * 4` (dmabuf rows are
+/// often padded to an alignment boundary; shm rows are tightly packed)
+fn downscale(w: u32, h: u32, src: &[u8], stride: usize, target: u32) -> (u32, u32, Vec<u8>) {
     let target = target.max(64).min(w.max(1));
     let scale = w as f32 / target as f32;
     let sw = target;
     let sh = ((h as f32 / scale).round() as u32).max(1);
-    let src = &buf.mmap[..];
-    let stride = w as usize * 4;
     let mut out = Vec::with_capacity((sw * sh * 4) as usize);
     for y in 0..sh {
         let sy = (((y as f32 + 0.5) * scale) as usize).min(h as usize - 1);
-        let row = &src[sy * stride..(sy + 1) * stride];
+        let row = &src[sy * stride..sy * stride + w as usize * 4];
         for x in 0..sw {
             let sx = ((((x as f32 + 0.5) * scale) as usize).min(w as usize - 1)) * 4;
             out.extend_from_slice(&row[sx..sx + 4]);

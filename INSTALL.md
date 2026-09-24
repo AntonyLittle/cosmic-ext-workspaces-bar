@@ -11,19 +11,19 @@ A bar showing live workspace previews for the COSMIC desktop.
   Debian/Ubuntu/Pop!_OS:
 
   ```sh
-  sudo apt install build-essential git pkg-config libwayland-dev libxkbcommon-dev
+  sudo apt install build-essential git pkg-config libwayland-dev libxkbcommon-dev libgbm-dev libegl1-mesa-dev
   ```
 
   Fedora:
 
   ```sh
-  sudo dnf install gcc git pkg-config wayland-devel libxkbcommon-devel
+  sudo dnf install gcc git pkg-config wayland-devel libxkbcommon-devel mesa-libgbm-devel mesa-libEGL-devel
   ```
 
   Arch:
 
   ```sh
-  sudo pacman -S base-devel git wayland libxkbcommon
+  sudo pacman -S base-devel git wayland libxkbcommon mesa
   ```
 
 ## Building
