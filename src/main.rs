@@ -310,7 +310,8 @@ impl App {
             })
             .unwrap_or(16.0 / 9.0);
         let len = view::bar_length(cfg.size, cfg.edge, self.workspaces_on(output), aspect);
-        let len = if cfg.media_enabled && self.media.is_some() {
+        // The media block is always reserved (placeholder when no player runs)
+        let len = if cfg.media_enabled {
             len + view::media_block_length(cfg.size, cfg.edge) + view::ITEM_SPACING as u32
         } else {
             len

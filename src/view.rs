@@ -100,7 +100,10 @@ pub fn bar_view<'a>(
         .filter(|w| w.outputs.contains(&surface.output))
         .map(|w| workspace_item(w, id, edge, thickness, ov));
 
-    let media = app.config.media_enabled.then(|| media_controls(app, thickness)).flatten();
+    let media = app
+        .config
+        .media_enabled
+        .then(|| media_controls(app, thickness).unwrap_or_else(|| media_placeholder(thickness)));
     let mut items: Vec<cosmic::Element<'_, Msg>> = items.collect();
     if let Some(media) = media {
         match app.config.media_position {
@@ -312,6 +315,53 @@ fn with_tooltip_if_truncated<'a>(
         )
         .into()
     }
+}
+
+/// Same shape as `media_controls`, shown while no MPRIS player is running
+fn media_placeholder(thickness: f32) -> cosmic::Element<'static, Msg> {
+    use crate::backend::media::Control;
+
+    let art = widget::container(widget::icon::from_name("folder-music-symbolic").size(24))
+        .width(Length::Fixed(thickness))
+        .height(Length::Fixed(thickness))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center);
+
+    let text = widget::column::with_capacity(2)
+        .align_x(Alignment::Center)
+        .push(
+            widget::text::caption("Not playing")
+                .wrapping(iced::widget::text::Wrapping::None)
+                .align_x(Alignment::Center)
+                .width(Length::Fixed(thickness)),
+        )
+        .push(widget::text::caption("").width(Length::Fixed(thickness)));
+
+    let buttons = widget::row::with_capacity(3)
+        .spacing(4.0)
+        .push(media_icon_button(
+            "media-skip-backward-symbolic",
+            false,
+            Msg::MediaControl(Control::Previous),
+        ))
+        .push(media_icon_button(
+            "media-playback-start-symbolic",
+            false,
+            Msg::MediaControl(Control::PlayPause),
+        ))
+        .push(media_icon_button(
+            "media-skip-forward-symbolic",
+            false,
+            Msg::MediaControl(Control::Next),
+        ));
+
+    widget::column::with_capacity(3)
+        .spacing(ITEM_INNER_SPACING)
+        .align_x(Alignment::Center)
+        .push(art)
+        .push(text)
+        .push(buttons)
+        .into()
 }
 
 /// Album art + title/artist + previous/play-pause/next, or `None` if no player
