@@ -4,11 +4,8 @@ A bar showing live workspace previews for the COSMIC desktop.
 
 ## Requirements
 
-- **COSMIC desktop** (cosmic-comp). The bar relies on COSMIC-specific Wayland
-  protocols (`ext-workspace`, COSMIC screencopy) and will not work on other
-  compositors.
-- **Rust** 1.85 or newer (the project uses the 2024 edition). Install via
-  [rustup](https://rustup.rs) if your distribution's toolchain is older.
+- **COSMIC desktop** (cosmic-comp). The bar relies on COSMIC-specific Wayland   protocols (`ext-workspace`, COSMIC screencopy) and will not work on other compositors.
+- **Rust** 1.85 or newer (the project uses the 2024 edition). Install via [rustup](https://rustup.rs) if your distribution's toolchain is older.
 - **Build tools and libraries** required by libcosmic:
 
   Debian/Ubuntu/Pop!_OS:
@@ -32,7 +29,7 @@ A bar showing live workspace previews for the COSMIC desktop.
 ## Building
 
 ```sh
-git clone https://github.com/antony/cosmic-ext-workspaces-bar.git
+git clone https://github.com/AntonyLittle/cosmic-ext-workspaces-bar.git
 cd cosmic-ext-workspaces-bar
 cargo build --release
 ```
@@ -56,8 +53,7 @@ sudo install -Dm755 target/release/cosmic-ext-workspaces-bar /usr/local/bin/cosm
 sudo install -Dm644 data/cosmic-ext-workspaces-bar.desktop /usr/local/share/applications/cosmic-ext-workspaces-bar.desktop
 ```
 
-Make sure the install location is on your `PATH` (the desktop file launches
-the binary by name).
+Make sure the install location is on your `PATH` (the desktop file launches the binary by name).
 
 ## Starting the bar
 
@@ -67,8 +63,7 @@ Run it directly to try it out:
 cosmic-ext-workspaces-bar
 ```
 
-To start it automatically when you log in to COSMIC, add the desktop file to
-your autostart directory:
+To start it automatically when you log in to COSMIC, add the desktop file to your autostart directory:
 
 ```sh
 install -Dm644 data/cosmic-ext-workspaces-bar.desktop ~/.config/autostart/cosmic-ext-workspaces-bar.desktop
@@ -82,8 +77,7 @@ Open the settings window either by right-clicking the bar, or from a terminal:
 cosmic-ext-workspaces-bar --settings
 ```
 
-The application is single-instance: running the command again while the bar is
-already running just opens the settings window.
+The application is single-instance: running the command again while the bar is already running just opens the settings window.
 
 Configuration is stored via cosmic-config under
 `~/.config/cosmic/com.github.antony.CosmicWorkspacesBar/`.
