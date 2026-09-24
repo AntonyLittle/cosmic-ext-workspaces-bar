@@ -90,6 +90,13 @@ async fn watch(sender: &mut mpsc::Sender<Event>) -> zbus::Result<()> {
 
     loop {
         let Some(name) = current.clone() else {
+            // Fall back to another already-running player before giving up
+            if let Ok(candidates) = mpris_candidates(&conn).await
+                && let Some(best) = pick_playing(&conn, candidates).await
+            {
+                current = Some(best);
+                continue;
+            }
             let _ = sender.send(Event::Player(None)).await;
             // Wait for a player to appear
             loop {
@@ -180,6 +187,31 @@ async fn pick_playing(conn: &Connection, candidates: Vec<String>) -> Option<Stri
     fallback
 }
 
+// Like `pick_playing`, but never falls back to an arbitrary "first found"
+// candidate - only returns Some if it's a genuine improvement (explicit
+// preference match, or actually Playing). Used for the periodic recheck so
+// an already-selected paused player with valid metadata isn't swapped out
+// for some other idle player just because it happened to enumerate first.
+async fn pick_better(conn: &Connection, candidates: Vec<String>) -> Option<String> {
+    let pattern = preferred();
+    if !pattern.is_empty()
+        && let Some(name) = candidates.iter().find(|n| matches_preferred(n, &pattern))
+    {
+        return Some(name.clone());
+    }
+    for name in candidates {
+        if let Ok(props) = fdo::PropertiesProxy::new(conn, name.clone(), PLAYER_PATH).await
+            && let Ok(status) = props
+                .get(PLAYER_IFACE.try_into().unwrap(), "PlaybackStatus")
+                .await
+            && String::try_from(status).ok().as_deref() == Some("Playing")
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
 async fn watch_player(
     conn: &Connection,
     name: &str,
@@ -230,7 +262,7 @@ async fn watch_player(
         tokio::select! {
             _ = recheck, if needs_recheck => {
                 if let Ok(candidates) = mpris_candidates(conn).await
-                    && let Some(best) = pick_playing(conn, candidates).await
+                    && let Some(best) = pick_better(conn, candidates).await
                     && best != name
                 {
                     return PlayerOutcome::Switch(best);
