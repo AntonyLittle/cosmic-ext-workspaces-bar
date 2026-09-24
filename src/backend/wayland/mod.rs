@@ -17,6 +17,8 @@ use cctk::sctk::registry::{ProvidesRegistryState, RegistryState};
 use cctk::sctk::seat::{SeatHandler, SeatState};
 use cctk::sctk::shm::{Shm, ShmHandler};
 use cctk::sctk::{self};
+use cctk::toplevel_info::ToplevelInfoState;
+use cctk::toplevel_management::ToplevelManagerState;
 use cctk::wayland_client::globals::registry_queue_init;
 use cctk::wayland_client::protocol::{wl_output, wl_seat};
 use cctk::wayland_client::{Connection, QueueHandle};
@@ -37,6 +39,7 @@ mod capture;
 use capture::Capture;
 mod screencopy;
 use screencopy::{ScreencopySession, SessionData};
+mod toplevel;
 mod workspace;
 
 use super::{Cmd, Event};
@@ -91,6 +94,9 @@ pub struct AppData {
     sender: mpsc::Sender<Event>,
     captures: RefCell<HashMap<CaptureSource, Arc<Capture>>>,
     bar_filter: Option<BarFilter>,
+    toplevel_info_state: ToplevelInfoState,
+    toplevel_manager_state: Option<ToplevelManagerState>,
+    seat: Option<wl_seat::WlSeat>,
 }
 
 impl AppData {
@@ -293,6 +299,36 @@ impl AppData {
                     }
                 }
             }
+            Cmd::ActivateToplevelByAppId(app_id) => {
+                self.activate_toplevel_by_app_id(&app_id);
+            }
+        }
+    }
+
+    // Fuzzy-matches a toplevel's app id (MPRIS `DesktopEntry`/bus-derived ids
+    // and Wayland `app_id`s often differ in case or fully-qualified-ness,
+    // e.g. MPRIS "spotify" vs. app_id "com.spotify.Client")
+    fn activate_toplevel_by_app_id(&self, app_id: &str) {
+        let needle = app_id.to_lowercase();
+        let Some(info) = self.toplevel_info_state.toplevels().find(|t| {
+            let hay = t.app_id.to_lowercase();
+            hay == needle || hay.contains(&needle) || needle.contains(&hay)
+        }) else {
+            return;
+        };
+
+        if let Some(workspace_handle) = info.workspace.iter().next()
+            && let Ok(workspace_manager) = self.workspace_state.workspace_manager().get()
+        {
+            workspace_handle.activate();
+            workspace_manager.commit();
+        }
+        if let (Some(manager_state), Some(cosmic_toplevel), Some(seat)) = (
+            self.toplevel_manager_state.as_ref(),
+            info.cosmic_toplevel.as_ref(),
+            self.seat.as_ref(),
+        ) {
+            manager_state.manager.activate(cosmic_toplevel, seat);
         }
     }
 
@@ -334,9 +370,17 @@ impl SeatHandler for AppData {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.seat.is_none() {
+            self.seat = Some(seat);
+        }
+    }
 
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.seat.as_ref() == Some(&seat) {
+            self.seat = None;
+        }
+    }
 
     fn new_capability(
         &mut self,
@@ -379,6 +423,9 @@ fn start(conn: Connection) -> mpsc::Receiver<Event> {
             loop_handle: event_loop.handle(),
             workspace_state: WorkspaceState::new(&registry_state, &qh),
             screencopy_state: ScreencopyState::new(&globals, &qh),
+            toplevel_info_state: ToplevelInfoState::new(&registry_state, &qh),
+            toplevel_manager_state: ToplevelManagerState::try_new(&registry_state, &qh),
+            seat: None,
             registry_state,
             seat_state: SeatState::new(&globals, &qh),
             shm_state: Shm::bind(&globals, &qh).unwrap(),

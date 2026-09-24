@@ -79,6 +79,12 @@ pub enum Msg {
     CloseWindow(SurfaceId),
     Media(backend::media::Event),
     MediaControl(backend::media::Control),
+    MediaArtLoaded(backend::media::ArtSource, Option<Vec<u8>>),
+    MediaRaise,
+    MediaScroll(ScrollDelta),
+    MediaMarqueeTick,
+    MediaVolumeChanged(f64),
+    MediaVolumeHideCheck(u64),
     Ignore,
 }
 
@@ -147,18 +153,104 @@ pub struct RenameDialog {
 pub struct MediaState {
     pub info: backend::media::PlayerState,
     pub art: Option<cosmic::widget::image::Handle>,
+    // Source last decoded/requested, so unrelated property changes don't re-fetch
+    art_source: Option<backend::media::ArtSource>,
+    pub art_pending: bool,
+    // Scroll position for marquee-ing titles/artists too long to fit
+    pub marquee_offset: usize,
+    // Last volume level set via scroll, shown briefly then cleared
+    pub volume: Option<f64>,
+    volume_generation: u64,
 }
 
-// Decode a small local album art file into an RGBA image handle
-fn load_art(path: &std::path::Path) -> Option<cosmic::widget::image::Handle> {
-    let bytes = std::fs::read(path).ok()?;
-    let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+/// Reject implausibly large decoded album art (bounds memory against a
+/// malformed or hostile image regardless of its compressed byte size)
+const MAX_ART_DIMENSION: u32 = 4096;
+
+// Decode compressed image bytes (local file or downloaded) into an RGBA handle
+fn decode_art(bytes: &[u8]) -> Option<cosmic::widget::image::Handle> {
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
+    if w == 0 || h == 0 || w > MAX_ART_DIMENSION || h > MAX_ART_DIMENSION {
+        log::warn!("decoded album art has implausible dimensions {w}x{h}, discarding");
+        return None;
+    }
     Some(cosmic::widget::image::Handle::from_rgba(
         w,
         h,
         img.into_raw(),
     ))
+}
+
+// Resolve an MPRIS `DesktopEntry` (or bus-name guess) to an icon-theme name.
+// Some players (notably Flatpak apps) report a DesktopEntry that doesn't
+// match their actual icon name, e.g. Spotify reports "spotify" but its
+// desktop file and icon are both "com.spotify.Client" — search installed
+// .desktop files for a matching id and use its own `Icon=` field.
+fn resolve_app_icon(desktop_entry: &str) -> String {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(icon) = cache.lock().unwrap().get(desktop_entry) {
+        return icon.clone();
+    }
+
+    let icon = find_app_icon(desktop_entry).unwrap_or_else(|| desktop_entry.to_string());
+    cache
+        .lock()
+        .unwrap()
+        .insert(desktop_entry.to_string(), icon.clone());
+    icon
+}
+
+fn find_app_icon(desktop_entry: &str) -> Option<String> {
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    let home_data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+        format!("{}/.local/share", std::env::var("HOME").unwrap_or_default())
+    });
+    let dirs: Vec<_> = std::iter::once(home_data)
+        .chain(data_dirs.split(':').map(str::to_string))
+        .map(|d| std::path::PathBuf::from(d).join("applications"))
+        .collect();
+
+    let needle = desktop_entry.to_lowercase();
+    let mut fuzzy: Option<String> = None;
+    for dir in &dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            let id_lower = id.to_lowercase();
+            let exact = id_lower == needle;
+            if exact || (fuzzy.is_none() && id_lower.contains(&needle)) {
+                let icon = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| {
+                        s.lines()
+                            .find_map(|l| l.strip_prefix("Icon=").map(str::to_string))
+                    })
+                    .unwrap_or_else(|| id.to_string());
+                if exact {
+                    return Some(icon);
+                }
+                fuzzy = Some(icon);
+            }
+        }
+    }
+    fuzzy
+}
+
+fn load_local_art(path: &std::path::Path) -> Option<Vec<u8>> {
+    std::fs::read(path).ok()
 }
 
 /// A layer surface with an exclusive zone, reported by overlap-notify
@@ -601,6 +693,7 @@ impl Application for App {
 
     fn init(core: cosmic::app::Core, flags: Args) -> (Self, Task<cosmic::Action<Msg>>) {
         let config = config::load();
+        backend::media::set_preferred(config.preferred_player.clone());
         let mut app = App {
             core,
             config_ctx: config::context(),
@@ -780,6 +873,9 @@ impl Application for App {
                     let blur_changed = new_config.blur != self.config.blur;
                     let autohide_changed = new_config.autohide != self.config.autohide;
                     let clip_changed = new_config.clip != self.config.clip;
+                    if new_config.preferred_player != self.config.preferred_player {
+                        backend::media::set_preferred(new_config.preferred_player.clone());
+                    }
                     self.config = new_config;
                     settings::sync_pickers(self);
                     if geometry_changed {
@@ -915,12 +1011,81 @@ impl Application for App {
                 return self.close_settings();
             }
             Msg::Media(backend::media::Event::Player(state)) => {
-                self.media = state.map(|info| {
-                    let art = info.art_path.as_deref().and_then(load_art);
-                    MediaState { info, art }
+                use backend::media::ArtSource;
+
+                let Some(info) = state else {
+                    self.media = None;
+                    return if self.config.media_enabled {
+                        self.resize_surfaces()
+                    } else {
+                        Task::none()
+                    };
+                };
+                // Keep whatever art we already have unless the source changed
+                let prev = self.media.take();
+                let same_source =
+                    prev.as_ref().is_some_and(|m| m.art_source == info.art) && info.art.is_some();
+                let prev_marquee_offset = prev.as_ref().map_or(0, |m| m.marquee_offset);
+                let prev_volume = prev.as_ref().map(|m| (m.volume, m.volume_generation));
+                let (art, art_source) = if same_source {
+                    (prev.and_then(|m| m.art), info.art.clone())
+                } else {
+                    (None, info.art.clone())
+                };
+                let art_pending = !same_source && art_source.is_some();
+                let (volume, volume_generation) = prev_volume.unwrap_or((None, 0));
+                self.media = Some(MediaState {
+                    info,
+                    art,
+                    art_source,
+                    art_pending,
+                    marquee_offset: if same_source { prev_marquee_offset } else { 0 },
+                    volume,
+                    volume_generation,
                 });
+
+                let mut tasks = Vec::new();
                 if self.config.media_enabled {
-                    return self.resize_surfaces();
+                    tasks.push(self.resize_surfaces());
+                }
+                if !same_source {
+                    match self.media.as_ref().and_then(|m| m.art_source.clone()) {
+                        Some(ArtSource::Local(path)) => {
+                            let source = ArtSource::Local(path.clone());
+                            tasks.push(Task::future(async move {
+                                let bytes =
+                                    tokio::task::spawn_blocking(move || load_local_art(&path))
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                cosmic::Action::App(Msg::MediaArtLoaded(source, bytes))
+                            }));
+                        }
+                        Some(ArtSource::Remote(url)) => {
+                            let source = ArtSource::Remote(url.clone());
+                            tasks.push(Task::future(async move {
+                                let bytes = backend::media::fetch_art_cached(url).await;
+                                cosmic::Action::App(Msg::MediaArtLoaded(source, bytes))
+                            }));
+                        }
+                        None => {}
+                    }
+                }
+                return Task::batch(tasks);
+            }
+            Msg::MediaArtLoaded(source, bytes) => {
+                if let Some(media) = self.media.as_mut()
+                    && media.art_source.as_ref() == Some(&source)
+                {
+                    let had_bytes = bytes.is_some();
+                    media.art_pending = false;
+                    media.art = bytes.as_deref().and_then(decode_art);
+                    if had_bytes && media.art.is_none() {
+                        log::warn!("failed to decode album art for {:?}", source);
+                    }
+                    if self.config.media_enabled {
+                        return self.resize_surfaces();
+                    }
                 }
             }
             Msg::MediaControl(control) => {
@@ -930,6 +1095,59 @@ impl Application for App {
                         backend::media::send_control(bus_name, control).await;
                         cosmic::Action::App(Msg::Ignore)
                     });
+                }
+            }
+            Msg::MediaRaise => {
+                if let Some(media) = self.media.as_ref().filter(|m| m.info.can_raise) {
+                    let bus_name = media.info.bus_name.clone();
+                    self.send_wayland_cmd(backend::Cmd::ActivateToplevelByAppId(
+                        media.info.desktop_entry.clone(),
+                    ));
+                    return Task::future(async move {
+                        backend::media::raise(bus_name).await;
+                        cosmic::Action::App(Msg::Ignore)
+                    });
+                }
+            }
+            Msg::MediaScroll(delta) => {
+                let y = match delta {
+                    ScrollDelta::Lines { y, .. } | ScrollDelta::Pixels { y, .. } => y,
+                };
+                if self.config.media_volume_scroll
+                    && let Some(media) = self.media.as_ref()
+                    && y != 0.0
+                {
+                    let bus_name = media.info.bus_name.clone();
+                    let step = if y > 0.0 { 0.05 } else { -0.05 };
+                    return Task::future(async move {
+                        match backend::media::adjust_volume(bus_name, step).await {
+                            Some(v) => cosmic::Action::App(Msg::MediaVolumeChanged(v)),
+                            None => cosmic::Action::App(Msg::Ignore),
+                        }
+                    });
+                }
+            }
+            Msg::MediaVolumeChanged(volume) => {
+                if let Some(media) = self.media.as_mut() {
+                    media.volume = Some(volume);
+                    media.volume_generation += 1;
+                    let generation = media.volume_generation;
+                    return Task::future(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                        cosmic::Action::App(Msg::MediaVolumeHideCheck(generation))
+                    });
+                }
+            }
+            Msg::MediaVolumeHideCheck(generation) => {
+                if let Some(media) = self.media.as_mut()
+                    && media.volume_generation == generation
+                {
+                    media.volume = None;
+                }
+            }
+            Msg::MediaMarqueeTick => {
+                if let Some(media) = self.media.as_mut() {
+                    media.marquee_offset = media.marquee_offset.wrapping_add(1);
                 }
             }
             Msg::CloseWindow(id) => {
@@ -1011,6 +1229,16 @@ impl Application for App {
         let mut subscriptions = vec![events, config_subscription, panel_theme_subscription];
         if self.config.media_enabled {
             subscriptions.push(backend::media::subscription().map(Msg::Media));
+            let needs_marquee = self.media.as_ref().is_some_and(|m| {
+                m.info.title.chars().count() > view::MEDIA_TEXT_MAX_CHARS
+                    || m.info.artist.chars().count() > view::MEDIA_TEXT_MAX_CHARS
+            });
+            if needs_marquee {
+                subscriptions.push(
+                    iced::time::every(std::time::Duration::from_millis(300))
+                        .map(|_| Msg::MediaMarqueeTick),
+                );
+            }
         }
         if let Some(conn) = self.conn.clone() {
             subscriptions.push(backend::subscription(conn).map(Msg::Wayland));

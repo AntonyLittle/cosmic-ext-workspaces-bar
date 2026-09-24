@@ -31,6 +31,9 @@ pub enum Event {
 pub enum Cmd {
     ActivateWorkspace(ExtWorkspaceHandleV1),
     RenameWorkspace(ExtWorkspaceHandleV1, String),
+    /// Switch to the workspace containing a toplevel matching this app id
+    /// (fuzzy substring match), and activate the toplevel itself if possible
+    ActivateToplevelByAppId(String),
     /// Geometry of the bar and outputs, for filtering self-caused damage,
     /// plus a pause flag used while the settings dialog is open (its redraws
     /// would otherwise feed a capture -> repaint -> capture loop)

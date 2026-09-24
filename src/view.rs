@@ -241,6 +241,79 @@ fn media_icon_button(name: &'static str, enabled: bool, msg: Msg) -> cosmic::Ele
     if enabled { btn.on_press(msg) } else { btn }.into()
 }
 
+// Slim level bar + percentage, shown briefly in place of the artist line
+// when the user scrolls to change volume
+fn volume_indicator(volume: f64, width: f32) -> cosmic::Element<'static, Msg> {
+    let pct = (volume * 100.0).round().clamp(0.0, 100.0) as u16;
+    let filled = pct.max(1).min(100);
+    let bar = widget::row::with_capacity(2)
+        .push(
+            widget::container(widget::text::caption(""))
+                .width(Length::FillPortion(filled))
+                .height(Length::Fixed(4.0))
+                .class(cosmic::theme::Container::custom(|theme| {
+                    cosmic::iced::widget::container::Style {
+                        background: Some(iced::Background::Color(theme.cosmic().accent.base.into())),
+                        border: iced::Border {
+                            radius: 2.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                })),
+        )
+        .push(
+            widget::container(widget::text::caption(""))
+                .width(Length::FillPortion(100 - filled))
+                .height(Length::Fixed(4.0)),
+        )
+        .width(Length::Fixed(width - 32.0));
+    widget::row::with_capacity(2)
+        .spacing(6.0)
+        .align_y(Alignment::Center)
+        .push(bar)
+        .push(widget::text::caption(format!("{pct}%")))
+        .into()
+}
+
+// Approximate character-count truncation; avoids the media block growing
+// wider than its reserved space for long titles/artists
+pub const MEDIA_TEXT_MAX_CHARS: usize = 22;
+
+// Sliding window over `s`, looping with a gap once it no longer fits;
+// stationary (equivalent to a plain fixed string) when it already fits
+fn marquee_display(s: &str, offset: usize) -> String {
+    let len = s.chars().count();
+    if len <= MEDIA_TEXT_MAX_CHARS {
+        return s.to_string();
+    }
+    const GAP: &str = "   ";
+    let looped: Vec<char> = s.chars().chain(GAP.chars()).collect();
+    let total = looped.len();
+    let start = offset % total;
+    (0..MEDIA_TEXT_MAX_CHARS)
+        .map(|i| looped[(start + i) % total])
+        .collect()
+}
+
+// Wrap truncated text in a tooltip showing the full value on hover
+fn with_tooltip_if_truncated<'a>(
+    text: impl Into<cosmic::Element<'a, Msg>>,
+    full: &str,
+) -> cosmic::Element<'a, Msg> {
+    let text = text.into();
+    if full.chars().count() <= MEDIA_TEXT_MAX_CHARS {
+        text
+    } else {
+        widget::tooltip(
+            text,
+            widget::text::body(full.to_string()),
+            widget::tooltip::Position::Bottom,
+        )
+        .into()
+    }
+}
+
 /// Album art + title/artist + previous/play-pause/next, or `None` if no player
 fn media_controls(app: &App, thickness: f32) -> Option<cosmic::Element<'_, Msg>> {
     use crate::backend::media::{Control, PlaybackStatus};
@@ -252,23 +325,57 @@ fn media_controls(app: &App, thickness: f32) -> Option<cosmic::Element<'_, Msg>>
             .width(Length::Fixed(thickness))
             .height(Length::Fixed(thickness))
             .into(),
-        None => widget::container(widget::icon::from_name("folder-music-symbolic").size(24))
-            .width(Length::Fixed(thickness))
-            .height(Length::Fixed(thickness))
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .into(),
+        None => {
+            let icon_name = if media.art_pending {
+                "content-loading-symbolic"
+            } else {
+                "folder-music-symbolic"
+            };
+            widget::container(widget::icon::from_name(icon_name).size(24))
+                .width(Length::Fixed(thickness))
+                .height(Length::Fixed(thickness))
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .into()
+        }
     };
 
-    let title = if media.info.title.is_empty() {
-        "Not playing"
+    let title_full = if media.info.title.is_empty() {
+        "Not playing".to_string()
     } else {
-        media.info.title.as_str()
+        media.info.title.clone()
+    };
+    let artist_full = media.info.artist.clone();
+    let title = marquee_display(&title_full, media.marquee_offset);
+    let artist = marquee_display(&artist_full, media.marquee_offset);
+    let title_text = with_tooltip_if_truncated(
+        widget::text::caption(title)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .align_x(Alignment::Center)
+            .width(Length::Fixed(thickness - 18.0)),
+        &title_full,
+    );
+    let title_row = widget::row::with_capacity(2)
+        .spacing(4.0)
+        .align_y(Alignment::Center)
+        .push(widget::icon::from_name(crate::resolve_app_icon(&media.info.desktop_entry)).size(14))
+        .push(title_text);
+    let artist_text = with_tooltip_if_truncated(
+        widget::text::caption(artist)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .align_x(Alignment::Center)
+            .width(Length::Fixed(thickness)),
+        &artist_full,
+    );
+    // Briefly replaces the artist line so scrolling doesn't resize the block
+    let second_line = match media.volume {
+        Some(volume) => volume_indicator(volume, thickness),
+        None => artist_text,
     };
     let text = widget::column::with_capacity(2)
         .align_x(Alignment::Center)
-        .push(widget::text::caption(title))
-        .push(widget::text::caption(media.info.artist.clone()));
+        .push(title_row)
+        .push(second_line);
 
     let play_icon = if media.info.status == PlaybackStatus::Playing {
         "media-playback-pause-symbolic"
@@ -293,15 +400,31 @@ fn media_controls(app: &App, thickness: f32) -> Option<cosmic::Element<'_, Msg>>
             Msg::MediaControl(Control::Next),
         ));
 
-    Some(
-        widget::column::with_capacity(3)
-            .spacing(ITEM_INNER_SPACING)
-            .align_x(Alignment::Center)
-            .push(art)
-            .push(text)
-            .push(buttons)
-            .into(),
-    )
+    let art_and_text = widget::column::with_capacity(2)
+        .spacing(ITEM_INNER_SPACING)
+        .align_x(Alignment::Center)
+        .push(art)
+        .push(text);
+    let art_and_text: cosmic::Element<'_, Msg> = if media.info.can_raise {
+        widget::mouse_area(art_and_text)
+            .on_press(Msg::MediaRaise)
+            .into()
+    } else {
+        art_and_text.into()
+    };
+
+    let block = widget::column::with_capacity(2)
+        .spacing(ITEM_INNER_SPACING)
+        .align_x(Alignment::Center)
+        .push(art_and_text)
+        .push(buttons);
+
+    let mut block_area = widget::mouse_area(block);
+    if app.config.media_volume_scroll {
+        block_area = block_area.on_scroll(Msg::MediaScroll);
+    }
+
+    Some(block_area.into())
 }
 
 fn workspace_item(

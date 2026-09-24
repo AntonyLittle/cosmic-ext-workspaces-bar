@@ -69,6 +69,8 @@ pub enum SettingsMsg {
     RoundEdgeCorners(bool),
     MediaEnabled(bool),
     MediaPosition(usize),
+    PreferredPlayer(String),
+    MediaVolumeScroll(bool),
     OverrideBg(bool),
     BgPicker(ColorPickerUpdate),
     OverrideBlur(bool),
@@ -147,6 +149,8 @@ pub fn update(app: &mut App, msg: SettingsMsg) -> Task<cosmic::Action<Msg>> {
                 write(app, "media_position", pos);
             }
         }
+        SettingsMsg::PreferredPlayer(v) => write(app, "preferred_player", v),
+        SettingsMsg::MediaVolumeScroll(v) => write(app, "media_volume_scroll", v),
         SettingsMsg::OverrideBg(custom) => {
             let value = custom.then(|| {
                 to_rgba(
@@ -426,6 +430,21 @@ pub fn view(app: &App) -> Element<'_, Msg> {
                     |i| msg(SettingsMsg::MediaPosition(i)),
                 ),
             )
+        }))
+        .add_maybe(cfg.media_enabled.then(|| {
+            settings::item(
+                "Preferred player",
+                widget::text_input("Automatic", &cfg.preferred_player)
+                    .on_input(|v| msg(SettingsMsg::PreferredPlayer(v)))
+                    .width(Length::Fixed(200.0)),
+            )
+        }))
+        .add_maybe(cfg.media_enabled.then(|| {
+            settings::item::builder("Adjust volume by scrolling")
+                .description("Scroll over the media controls to change the active player's volume")
+                .toggler(cfg.media_volume_scroll, |v| {
+                    msg(SettingsMsg::MediaVolumeScroll(v))
+                })
         }));
 
     let mut appearance = settings::section()

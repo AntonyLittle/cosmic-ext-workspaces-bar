@@ -86,6 +86,11 @@ pub struct Config {
     pub media_enabled: bool,
     /// Where the media controls appear along the bar
     pub media_position: MediaPosition,
+    /// Substring to match against a player's bus name/app id, overriding the
+    /// "prefer whichever is Playing" heuristic; empty = automatic
+    pub preferred_player: String,
+    /// Adjust volume by scrolling over the media controls
+    pub media_volume_scroll: bool,
     // Theme overrides; `None` = follow the top bar / system theme
     pub bg_color: Option<[f32; 4]>,
     pub blur: Option<bool>,
@@ -108,6 +113,8 @@ impl Default for Config {
             clip: Clip::default(),
             media_enabled: false,
             media_position: MediaPosition::default(),
+            preferred_player: String::new(),
+            media_volume_scroll: true,
             bg_color: None,
             blur: None,
             bar_radius: None,
