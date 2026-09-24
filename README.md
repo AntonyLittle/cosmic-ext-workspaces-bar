@@ -7,6 +7,25 @@ actual contents, so you can see what's happening on a workspace before
 switching to it. The bar can also show MPRIS media controls (play/pause,
 skip, title/artist, album art) for whatever's currently playing.
 
+## Authors note
+
+This app is entirely vibe coded. I hate that it works as well as it does, but
+it does. Aside from a little prompting here and there I have done nothing, and 
+likely deserve little credit except for the idea and the design. I have been
+a software developer for my entire adult life, using mostly C++, C#, and Java.
+I have never touched Rust before this in my life.
+
+I cannot guarantee anything about this repo. Do not trust it. It may hack your 
+toaster, then fire warmed bread at your cat. That's on you.
+
+In the future, the following things may happen, depending on my token budget:
+
+- Separation of the workspaces and the media player into separate, but 
+  compatible, components.
+- Make the components into Applets.
+- Maybe, maybe turn this into yet another configurable bar thing like polybar 
+  or eww or similar. There are a lot of those already, though.
+
 ## Features
 
 - **Live workspace previews** — each workspace shows a real-time thumbnail
