@@ -9,11 +9,14 @@ mod view;
 
 use cosmic::app::{Application, CosmicFlags};
 use cosmic::cctk;
-use cosmic::iced::event::wayland::{Event as WaylandEvent, LayerEvent, OutputEvent, PopupEvent};
+use cosmic::iced::event::wayland::{
+    Event as WaylandEvent, LayerEvent, OutputEvent, OverlapNotifyEvent, PopupEvent,
+};
 use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
     destroy_layer_surface, get_layer_surface, set_exclusive_zone, set_margin, set_size,
 };
+use cosmic::iced::platform_specific::shell::commands::overlap_notify::overlap_notify;
 use cosmic::iced::platform_specific::shell::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::runtime::platform_specific::wayland::layer_surface::{
     IcedOutput, SctkLayerSurfaceSettings,
@@ -138,6 +141,15 @@ pub struct RenameDialog {
     pub value: String,
 }
 
+/// A layer surface with an exclusive zone, reported by overlap-notify
+#[derive(Clone, Debug)]
+struct Reserved {
+    output: wl_output::WlOutput,
+    namespace: String,
+    exclusive: u32,
+    rect: iced::Rectangle,
+}
+
 pub struct App {
     core: cosmic::app::Core,
     pub config: config::Config,
@@ -148,6 +160,9 @@ pub struct App {
     pub rename: Option<RenameDialog>,
     frosted_panel: bool,
     pub layer_surfaces: HashMap<SurfaceId, LayerSurface>,
+    // Invisible full-output surfaces used to receive overlap-notify events
+    probe_surfaces: HashMap<SurfaceId, wl_output::WlOutput>,
+    reserved: HashMap<(SurfaceId, String), Reserved>,
     outputs: Vec<Output>,
     pub workspaces: Vec<Workspace>,
     conn: Option<Connection>,
@@ -169,20 +184,15 @@ impl App {
         if cfg.fill {
             return cfg.edge.layer_size(cfg.size);
         }
-        // Thumbnails have the bar strip cropped out unless auto-hiding
+        // Previews are cropped by the measured clip strips
         let aspect = self
             .outputs
             .iter()
             .find(|o| &o.handle == output)
             .and_then(|o| {
-                let (mut w, mut h) = (o.width as f32, o.height as f32);
-                if !cfg.autohide {
-                    if cfg.edge.is_vertical() {
-                        w -= cfg.size as f32;
-                    } else {
-                        h -= cfg.size as f32;
-                    }
-                }
+                let clips = self.edge_clips(&o.handle);
+                let w = o.width as f32 - (clips[2] + clips[3]) as f32;
+                let h = o.height as f32 - (clips[0] + clips[1]) as f32;
                 (w > 0.0 && h > 0.0).then_some(w / h)
             })
             .unwrap_or(16.0 / 9.0);
@@ -351,6 +361,61 @@ impl App {
         Task::batch(destroy.into_iter().chain(create))
     }
 
+    // Invisible full-output surface; overlap-notify on it reports every
+    // layer surface on the output, giving us all reserved (exclusive) strips
+    fn create_probe(&mut self, output: wl_output::WlOutput) -> Task<cosmic::Action<Msg>> {
+        let id = SurfaceId::unique();
+        self.probe_surfaces.insert(id, output.clone());
+        Task::batch([
+            get_layer_surface(SctkLayerSurfaceSettings {
+                id,
+                keyboard_interactivity: KeyboardInteractivity::None,
+                input_zone: Some(Vec::new()),
+                namespace: "workspaces-bar-probe".into(),
+                layer: Layer::Background,
+                size: Some((None, None)),
+                output: IcedOutput::Output(output),
+                anchor: Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+                exclusive_zone: -1,
+                ..Default::default()
+            }),
+            overlap_notify(id, true),
+        ])
+    }
+
+    // Logical clip thickness per edge (top, bottom, left, right) on an output
+    fn edge_clips(&self, output: &wl_output::WlOutput) -> [u32; 4] {
+        let mut clips = [0u32; 4];
+        if self.config.clip == config::Clip::None {
+            return clips;
+        }
+        let Some(o) = self.outputs.iter().find(|o| &o.handle == output) else {
+            return clips;
+        };
+        let (w, h) = (o.width as f32, o.height as f32);
+        for r in self.reserved.values() {
+            if r.output != *output || r.exclusive == 0 {
+                continue;
+            }
+            if self.config.clip == config::Clip::OwnBar && r.namespace != "workspaces-bar" {
+                continue;
+            }
+            let rect = r.rect;
+            if rect.width >= rect.height {
+                if rect.y + rect.height / 2.0 < h / 2.0 {
+                    clips[0] = clips[0].max((rect.y + rect.height).round() as u32);
+                } else {
+                    clips[1] = clips[1].max((h - rect.y).round() as u32);
+                }
+            } else if rect.x + rect.width / 2.0 < w / 2.0 {
+                clips[2] = clips[2].max((rect.x + rect.width).round() as u32);
+            } else {
+                clips[3] = clips[3].max((w - rect.x).round() as u32);
+            }
+        }
+        clips
+    }
+
     // The settings dialog is a layer surface rather than a window: toplevel
     // windows from this no-main-window app repaint in a runtime-internal loop,
     // flickering on every commit; the layer surface path renders cleanly
@@ -485,7 +550,11 @@ impl App {
                 .map(|o| (o.handle.clone(), (o.width, o.height)))
                 .collect(),
             paused: self.settings.window.is_some(),
-            crop: !self.config.autohide,
+            clips: self
+                .outputs
+                .iter()
+                .map(|o| (o.handle.clone(), self.edge_clips(&o.handle)))
+                .collect(),
         });
     }
 }
@@ -508,6 +577,8 @@ impl Application for App {
             context_menu: None,
             rename: None,
             layer_surfaces: HashMap::new(),
+            probe_surfaces: HashMap::new(),
+            reserved: HashMap::new(),
             outputs: Vec::new(),
             workspaces: Vec::new(),
             conn: None,
@@ -544,7 +615,10 @@ impl Application for App {
                                     height,
                                 });
                                 self.send_bar_filter();
-                                return self.create_surface(output);
+                                return Task::batch([
+                                    self.create_surface(output.clone()),
+                                    self.create_probe(output),
+                                ]);
                             }
                         }
                         OutputEvent::Created(None) => {}
@@ -566,8 +640,19 @@ impl Application for App {
                             {
                                 self.outputs.remove(idx);
                             }
+                            self.reserved.retain(|_, r| r.output != output);
+                            let probe = self
+                                .probe_surfaces
+                                .iter()
+                                .find(|(_, o)| **o == output)
+                                .map(|(id, _)| *id);
                             self.send_bar_filter();
-                            return self.destroy_surface(&output);
+                            let mut tasks = vec![self.destroy_surface(&output)];
+                            if let Some(id) = probe {
+                                self.probe_surfaces.remove(&id);
+                                tasks.push(destroy_layer_surface(id));
+                            }
+                            return Task::batch(tasks);
                         }
                     }
                 }
@@ -579,11 +664,46 @@ impl Application for App {
                     if self.rename.as_ref().is_some_and(|d| d.id == id) {
                         self.rename = None;
                     }
+                    if self.probe_surfaces.remove(&id).is_some() {
+                        self.reserved.retain(|(probe, _), _| *probe != id);
+                    }
                     self.layer_surfaces.remove(&id);
                 }
                 WaylandEvent::Popup(PopupEvent::Done, _surface, id) => {
                     if self.context_menu.as_ref().is_some_and(|m| m.id == id) {
                         self.context_menu = None;
+                    }
+                }
+                WaylandEvent::OverlapNotify(event, _surface, id) => {
+                    if let Some(output) = self.probe_surfaces.get(&id).cloned() {
+                        let changed = match event {
+                            OverlapNotifyEvent::OverlapLayerAdd {
+                                identifier,
+                                namespace,
+                                exclusive,
+                                logical_rect,
+                                ..
+                            } => {
+                                self.reserved.insert(
+                                    (id, identifier),
+                                    Reserved {
+                                        output,
+                                        namespace,
+                                        exclusive,
+                                        rect: logical_rect,
+                                    },
+                                );
+                                true
+                            }
+                            OverlapNotifyEvent::OverlapLayerRemove { identifier } => {
+                                self.reserved.remove(&(id, identifier)).is_some()
+                            }
+                            _ => false,
+                        };
+                        if changed {
+                            self.send_bar_filter();
+                            return self.resize_surfaces();
+                        }
                     }
                 }
                 _ => {}
@@ -624,6 +744,7 @@ impl Application for App {
                         || new_config.fill != self.config.fill;
                     let blur_changed = new_config.blur != self.config.blur;
                     let autohide_changed = new_config.autohide != self.config.autohide;
+                    let clip_changed = new_config.clip != self.config.clip;
                     self.config = new_config;
                     settings::sync_pickers(self);
                     if geometry_changed {
@@ -635,9 +756,11 @@ impl Application for App {
                         tasks.push(self.apply_blur_all());
                     }
                     if autohide_changed {
-                        self.send_bar_filter();
                         tasks.push(self.apply_autohide_all());
-                        // Cropped thumbnail aspect changes centered-mode length
+                    }
+                    if autohide_changed || clip_changed {
+                        self.send_bar_filter();
+                        // Clip changes alter preview aspect in centered mode
                         tasks.push(self.resize_surfaces());
                     }
                     if !tasks.is_empty() {
@@ -794,7 +917,8 @@ impl Application for App {
                 match &evt {
                     WaylandEvent::Output(..)
                     | WaylandEvent::Layer(..)
-                    | WaylandEvent::Popup(..) => Some(Msg::WaylandEvent(evt)),
+                    | WaylandEvent::Popup(..)
+                    | WaylandEvent::OverlapNotify(..) => Some(Msg::WaylandEvent(evt)),
                     _ => None,
                 }
             }

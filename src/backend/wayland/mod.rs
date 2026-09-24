@@ -58,7 +58,7 @@ pub struct BarFilter {
     pub size: u32,
     pub outputs: Vec<(wl_output::WlOutput, (i32, i32))>,
     pub paused: bool,
-    pub crop: bool,
+    pub clips: Vec<(wl_output::WlOutput, [u32; 4])>,
 }
 
 pub fn subscription(conn: Connection) -> iced::Subscription<Event> {
@@ -150,11 +150,54 @@ impl AppData {
         })
     }
 
-    // Strip to crop out of thumbnails; None while auto-hiding, when the
-    // strip contains real workspace content
-    pub(crate) fn crop_strip(&self, source: &CaptureSource, size: (u32, u32)) -> Option<Rect> {
-        self.bar_filter.as_ref().filter(|f| f.crop)?;
-        self.bar_strip(source, size)
+    // Buffer-space crop thickness per edge for the workspace's output, and
+    // whether the crop fully covers the bar's own strip
+    pub(crate) fn clip_for(
+        &self,
+        source: &CaptureSource,
+        buffer_size: (u32, u32),
+    ) -> Option<([u32; 4], bool)> {
+        let filter = self.bar_filter.as_ref()?;
+        let CaptureSource::Workspace(ws) = source else {
+            return None;
+        };
+        let group = self
+            .workspace_state
+            .workspace_groups()
+            .find(|g| g.workspaces.iter().any(|w| w == ws))?;
+        let (output, (lw, lh)) = group.outputs.iter().find_map(|o| {
+            filter
+                .outputs
+                .iter()
+                .find(|(fo, _)| fo == o)
+                .map(|(fo, s)| (fo.clone(), *s))
+        })?;
+        if lw <= 0 || lh <= 0 {
+            return None;
+        }
+        let clips = filter
+            .clips
+            .iter()
+            .find(|(o, _)| *o == output)
+            .map(|(_, c)| *c)?;
+        if clips == [0; 4] {
+            return None;
+        }
+        let sx = buffer_size.0 as f32 / lw as f32;
+        let sy = buffer_size.1 as f32 / lh as f32;
+        let buf = [
+            (clips[0] as f32 * sy).ceil() as u32,
+            (clips[1] as f32 * sy).ceil() as u32,
+            (clips[2] as f32 * sx).ceil() as u32,
+            (clips[3] as f32 * sx).ceil() as u32,
+        ];
+        let own_covered = match filter.edge {
+            Edge::Top => clips[0] >= filter.size,
+            Edge::Bottom => clips[1] >= filter.size,
+            Edge::Left => clips[2] >= filter.size,
+            Edge::Right => clips[3] >= filter.size,
+        };
+        Some((buf, own_covered))
     }
 
     // True if the two downscaled frames are identical outside the bar strip
@@ -164,12 +207,13 @@ impl AppData {
         size: (u32, u32),
         prev: &[u8],
         cur: &[u8],
+        own_clipped: bool,
     ) -> bool {
         if prev.len() != cur.len() {
             return false;
         }
         // Cropped frames no longer contain the bar strip
-        if self.bar_filter.as_ref().is_some_and(|f| f.crop) {
+        if own_clipped {
             return rows_similar(prev, cur);
         }
         let (w, h) = size;
@@ -225,7 +269,7 @@ impl AppData {
                 size,
                 outputs,
                 paused,
-                crop,
+                clips,
             } => {
                 let was_paused = self.captures_paused();
                 self.bar_filter = Some(BarFilter {
@@ -233,7 +277,7 @@ impl AppData {
                     size,
                     outputs,
                     paused,
-                    crop,
+                    clips,
                 });
                 if paused && !was_paused {
                     for capture in self.captures.borrow().values() {

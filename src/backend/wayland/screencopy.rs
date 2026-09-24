@@ -168,17 +168,21 @@ impl ScreencopyHandler for AppData {
         let front = &bufs[0];
         // Downscale to preview resolution; all further work is on the small image
         let (sw, sh, small) = downscale(front);
-        // Crop out the bar's own strip while it exclusively reserves its edge
-        let (sw, sh, small) = match self.crop_strip(&capture.source, (sw, sh)) {
-            Some(strip) => crop(sw, sh, small, strip),
+        // Crop out the configured reserved strips (own bar / all bars)
+        let clip = self.clip_for(&capture.source, (sw, sh));
+        let (sw, sh, small) = match clip {
+            Some((edges, _)) => crop(sw, sh, small, edges),
             None => (sw, sh, small),
         };
+        let own_clipped = clip.is_some_and(|(_, own)| own);
         // Skip frames identical outside the bar strip: they are our own
         // repaints and forwarding them would loop capture -> repaint -> capture
         let skip = session
             .prev_small
             .as_ref()
-            .is_some_and(|prev| self.small_unchanged(&capture.source, (sw, sh), prev, &small));
+            .is_some_and(|prev| {
+                self.small_unchanged(&capture.source, (sw, sh), prev, &small, own_clipped)
+            });
         let image = (!skip).then(|| CaptureImage {
             width: sw,
             height: sh,
@@ -281,35 +285,20 @@ fn downscale(buf: &Buffer) -> (u32, u32, Vec<u8>) {
     (sw, sh, out)
 }
 
-/// Remove an edge strip's rows or columns from an RGBA image
-fn crop(w: u32, h: u32, data: Vec<u8>, strip: cctk::screencopy::Rect) -> (u32, u32, Vec<u8>) {
-    let stride = w as usize * 4;
-    let sx0 = (strip.x.max(0) as usize).min(w as usize);
-    let sx1 = ((strip.x + strip.width).clamp(0, w as i32)) as usize;
-    let sy0 = (strip.y.max(0) as usize).min(h as usize);
-    let sy1 = ((strip.y + strip.height).clamp(0, h as i32)) as usize;
-    if sx1 - sx0 >= w as usize {
-        // Horizontal strip: drop rows
-        if sy1 - sy0 >= h as usize {
-            return (w, h, data);
-        }
-        let mut out = Vec::with_capacity((h as usize - (sy1 - sy0)) * stride);
-        for y in (0..sy0).chain(sy1..h as usize) {
-            out.extend_from_slice(&data[y * stride..(y + 1) * stride]);
-        }
-        (w, h - (sy1 - sy0) as u32, out)
-    } else {
-        // Vertical strip: drop columns
-        if sx1 <= sx0 {
-            return (w, h, data);
-        }
-        let new_w = w as usize - (sx1 - sx0);
-        let mut out = Vec::with_capacity(new_w * 4 * h as usize);
-        for y in 0..h as usize {
-            let row = &data[y * stride..(y + 1) * stride];
-            out.extend_from_slice(&row[..sx0 * 4]);
-            out.extend_from_slice(&row[sx1 * 4..]);
-        }
-        (new_w as u32, h, out)
+/// Remove crop thicknesses (top, bottom, left, right) from an RGBA image
+fn crop(w: u32, h: u32, data: Vec<u8>, edges: [u32; 4]) -> (u32, u32, Vec<u8>) {
+    let [top, bottom, left, right] = edges.map(|e| e as usize);
+    let (w, h) = (w as usize, h as usize);
+    if top + bottom >= h || left + right >= w {
+        return (w as u32, h as u32, data);
     }
+    let stride = w * 4;
+    let new_w = w - left - right;
+    let new_h = h - top - bottom;
+    let mut out = Vec::with_capacity(new_w * new_h * 4);
+    for y in top..h - bottom {
+        let row = &data[y * stride..(y + 1) * stride];
+        out.extend_from_slice(&row[left * 4..(w - right) * 4]);
+    }
+    (new_w as u32, new_h as u32, out)
 }

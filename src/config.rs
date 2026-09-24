@@ -50,6 +50,17 @@ impl Edge {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Clip {
+    /// Crop this bar's reserved strip out of workspace previews
+    #[default]
+    OwnBar,
+    /// Crop every exclusive bar/panel/dock strip out of previews
+    AllBars,
+    /// Show previews uncropped
+    None,
+}
+
 #[derive(Clone, Debug, PartialEq, CosmicConfigEntry)]
 pub struct Config {
     /// Thickness of the bar in logical pixels
@@ -62,6 +73,8 @@ pub struct Config {
     pub autohide: bool,
     /// Round the bar corners that touch the screen edge
     pub round_edge_corners: bool,
+    /// Which reserved bar strips to crop out of workspace previews
+    pub clip: Clip,
     // Theme overrides; `None` = follow the top bar / system theme
     pub bg_color: Option<[f32; 4]>,
     pub blur: Option<bool>,
@@ -81,6 +94,7 @@ impl Default for Config {
             fill: true,
             autohide: false,
             round_edge_corners: true,
+            clip: Clip::default(),
             bg_color: None,
             blur: None,
             bar_radius: None,

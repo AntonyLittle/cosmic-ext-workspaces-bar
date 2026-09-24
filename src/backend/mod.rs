@@ -38,8 +38,8 @@ pub enum Cmd {
         size: u32,
         outputs: Vec<(wl_output::WlOutput, (i32, i32))>,
         paused: bool,
-        /// Crop the bar strip out of thumbnails; only safe when the bar
-        /// reserves its edge exclusively (autohide off)
-        crop: bool,
+        /// Logical clip thickness per edge (top, bottom, left, right) to
+        /// crop out of thumbnails, per output
+        clips: Vec<(wl_output::WlOutput, [u32; 4])>,
     },
 }

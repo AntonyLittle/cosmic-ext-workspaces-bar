@@ -8,11 +8,13 @@ use cosmic::widget::{self, color_picker::ColorPickerUpdate, settings, ColorPicke
 use cosmic::{iced::Task, Element};
 use serde::Serialize;
 
-use crate::config::{Config, Edge};
+use crate::config::{Clip, Config, Edge};
 use crate::{App, Msg};
 
 const EDGE_LABELS: &[&str] = &["Top", "Bottom", "Left", "Right"];
 const EDGES: &[Edge] = &[Edge::Top, Edge::Bottom, Edge::Left, Edge::Right];
+const CLIP_LABELS: &[&str] = &["This bar", "All bars", "Nothing"];
+const CLIPS: &[Clip] = &[Clip::OwnBar, Clip::AllBars, Clip::None];
 
 pub struct SettingsState {
     pub window: Option<iced::window::Id>,
@@ -61,6 +63,7 @@ pub enum SettingsMsg {
     Size(u32),
     Fill(bool),
     Autohide(bool),
+    Clip(usize),
     RoundEdgeCorners(bool),
     OverrideBg(bool),
     BgPicker(ColorPickerUpdate),
@@ -128,6 +131,11 @@ pub fn update(app: &mut App, msg: SettingsMsg) -> Task<cosmic::Action<Msg>> {
         SettingsMsg::Size(v) => write(app, "size", v),
         SettingsMsg::Fill(v) => write(app, "fill", v),
         SettingsMsg::Autohide(v) => write(app, "autohide", v),
+        SettingsMsg::Clip(i) => {
+            if let Some(clip) = CLIPS.get(i) {
+                write(app, "clip", clip);
+            }
+        }
         SettingsMsg::RoundEdgeCorners(v) => write(app, "round_edge_corners", v),
         SettingsMsg::OverrideBg(custom) => {
             let value = custom.then(|| {
@@ -381,6 +389,15 @@ pub fn view(app: &App) -> Element<'_, Msg> {
         .add(
             settings::item::builder("Automatically hide the bar")
                 .toggler(cfg.autohide, |v| msg(SettingsMsg::Autohide(v))),
+        )
+        .add(
+            settings::item::builder("Hide bars in previews")
+                .description("Crop reserved bar areas out of workspace previews")
+                .control(widget::dropdown(
+                    CLIP_LABELS,
+                    CLIPS.iter().position(|c| *c == cfg.clip),
+                    |i| msg(SettingsMsg::Clip(i)),
+                )),
         );
 
     let mut appearance = settings::section()
