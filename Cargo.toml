@@ -27,4 +27,6 @@ git = "https://github.com/pop-os/libcosmic"
 rev = "8cb10bf6e24b86a7d2a9cf8c662d3e0154db1b21"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+strip = true

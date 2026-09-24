@@ -5,6 +5,7 @@
 
 use calloop::timer::{TimeoutAction, Timer};
 use cosmic::cctk;
+use cosmic::iced::core::Bytes;
 
 use cctk::screencopy::{
     CaptureFrame, CaptureOptions, CaptureSession, CaptureSource, FailureReason, Formats, Frame,
@@ -19,18 +20,21 @@ use std::sync::{Arc, Weak};
 use super::{AppData, Buffer, CAPTURE_INTERVAL, Capture, Event, MAX_CAPTURE_INTERVAL};
 use crate::backend::CaptureImage;
 
-// Number of buffers to swap between
-const BUFFER_COUNT: usize = 2;
+// We copy out of the buffer synchronously in `ready`, so one is enough
+const BUFFER_COUNT: usize = 1;
 
 pub struct ScreencopySession {
     formats: Option<Formats>,
-    // swapchain buffers
     buffers: Option<[Buffer; BUFFER_COUNT]>,
     session: CaptureSession,
     // adaptive throttle: grows while the workspace is idle
     interval: std::time::Duration,
     // previous downscaled frame, for change detection
-    prev_small: Option<Vec<u8>>,
+    prev_small: Option<Bytes>,
+    // capture requested but not yet delivered
+    in_flight: bool,
+    // pending re-capture timer, so workspace switches can preempt it
+    timer_token: Option<calloop::RegistrationToken>,
 }
 
 impl ScreencopySession {
@@ -55,6 +59,8 @@ impl ScreencopySession {
             session,
             interval: CAPTURE_INTERVAL,
             prev_small: None,
+            in_flight: false,
+            timer_token: None,
         }
     }
 
@@ -64,10 +70,11 @@ impl ScreencopySession {
         conn: &Connection,
         qh: &QueueHandle<AppData>,
     ) {
-        let Some(back) = self.buffers.as_ref().map(|x| &x[1]) else {
+        let Some(back) = self.buffers.as_ref().map(|x| &x[0]) else {
             return;
         };
 
+        self.in_flight = true;
         self.session.capture(
             &back.buffer,
             &back.buffer_damage,
@@ -139,7 +146,7 @@ impl ScreencopyHandler for AppData {
         conn: &Connection,
         qh: &QueueHandle<Self>,
         capture_frame: &CaptureFrame,
-        frame: Frame,
+        _frame: Frame,
     ) {
         let capture = &capture_frame.data::<FrameData>().unwrap().capture;
         let Some(capture) = capture.upgrade() else {
@@ -149,25 +156,21 @@ impl ScreencopyHandler for AppData {
         let Some(session) = session_guard.as_mut() else {
             return;
         };
+        session.in_flight = false;
 
         if session.buffers.is_none() {
             log::error!("No capture buffers?");
             return;
         }
 
-        // swap buffers
-        session.buffers.as_mut().unwrap().rotate_left(1);
-
-        // Clear `buffer_damage` for front buffer; accumulate for other buffers.
+        // Single reused buffer: after this copy it matches compositor state
         session.buffers.as_mut().unwrap()[0].buffer_damage.clear();
-        for buffer in &mut session.buffers.as_mut().unwrap()[1..] {
-            buffer.buffer_damage.extend_from_slice(&frame.damage);
-        }
 
         let bufs = session.buffers.as_ref().unwrap();
         let front = &bufs[0];
         // Downscale to preview resolution; all further work is on the small image
-        let (sw, sh, small) = downscale(front);
+        let target = self.bar_filter.as_ref().map_or(512, |f| f.preview_px);
+        let (sw, sh, small) = downscale(front, target);
         // Crop out the configured reserved strips (own bar / all bars)
         let clip = self.clip_for(&capture.source, (sw, sh));
         let (sw, sh, small) = match clip {
@@ -177,12 +180,10 @@ impl ScreencopyHandler for AppData {
         let own_clipped = clip.is_some_and(|(_, own)| own);
         // Skip frames identical outside the bar strip: they are our own
         // repaints and forwarding them would loop capture -> repaint -> capture
-        let skip = session
-            .prev_small
-            .as_ref()
-            .is_some_and(|prev| {
-                self.small_unchanged(&capture.source, (sw, sh), prev, &small, own_clipped)
-            });
+        let small = Bytes::from(small);
+        let skip = session.prev_small.as_ref().is_some_and(|prev| {
+            self.small_unchanged(&capture.source, (sw, sh), prev, &small, own_clipped)
+        });
         let image = (!skip).then(|| CaptureImage {
             width: sw,
             height: sh,
@@ -202,15 +203,20 @@ impl ScreencopyHandler for AppData {
         let capture_clone = capture.clone();
         let conn = conn.clone();
         let qh = qh.clone();
-        self.loop_handle
+        let token = self
+            .loop_handle
             .insert_source(Timer::from_duration(interval), move |_, _, _| {
                 let mut session = capture_clone.session.lock().unwrap();
                 if let Some(session) = session.as_mut() {
+                    session.timer_token = None;
                     session.attach_buffer_and_commit(&capture_clone, &conn, &qh);
                 }
                 TimeoutAction::Drop
             })
             .unwrap();
+        if let Some(session) = capture.session.lock().unwrap().as_mut() {
+            session.timer_token = Some(token);
+        }
 
         if let Some(image) = image {
             match &capture.source {
@@ -262,12 +268,30 @@ impl ScreencopyHandler for AppData {
     }
 }
 
+impl AppData {
+    // Reset throttles and re-capture promptly; used on workspace changes
+    pub(crate) fn reset_capture_intervals(&self) {
+        for capture in self.captures.borrow().values() {
+            let mut guard = capture.session.lock().unwrap();
+            if let Some(session) = guard.as_mut() {
+                session.interval = CAPTURE_INTERVAL;
+                if !session.in_flight
+                    && let Some(token) = session.timer_token.take()
+                {
+                    self.loop_handle.remove(token);
+                    session.attach_buffer_and_commit(capture, &self.conn, &self.qh);
+                }
+            }
+        }
+    }
+}
+
 cctk::delegate_screencopy!(AppData);
 
-/// Nearest-neighbor downscale to at most 512px wide
-fn downscale(buf: &Buffer) -> (u32, u32, Vec<u8>) {
+/// Nearest-neighbor downscale to at most `target` px wide
+fn downscale(buf: &Buffer, target: u32) -> (u32, u32, Vec<u8>) {
     let (w, h) = buf.size;
-    let target = 512u32.min(w.max(1));
+    let target = target.max(64).min(w.max(1));
     let scale = w as f32 / target as f32;
     let sw = target;
     let sh = ((h as f32 / scale).round() as u32).max(1);

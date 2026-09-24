@@ -31,6 +31,9 @@ impl WorkspaceHandler for AppData {
             self.add_capture_source(source);
         }
 
+        // Workspace switches should refresh previews promptly
+        self.reset_capture_intervals();
+
         self.send_event(Event::Workspaces(workspaces));
     }
 }

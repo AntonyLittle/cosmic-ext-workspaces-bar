@@ -291,6 +291,8 @@ impl App {
             return Task::none();
         };
         surface.hidden = true;
+        // Nobody sees previews while every bar is hidden; pause captures
+        self.send_bar_filter();
         let (top, right, bottom, left) = hidden_margin(self.config.edge, self.config.size);
         set_margin(id, top, right, bottom, left)
     }
@@ -299,6 +301,7 @@ impl App {
         if let Some(surface) = self.layer_surfaces.get_mut(&id) {
             surface.hidden = false;
             surface.hide_generation += 1;
+            self.send_bar_filter();
         }
         set_margin(id, 0, 0, 0, 0)
     }
@@ -541,6 +544,9 @@ impl App {
 
     // Tell the backend where the bar is, so self-caused damage can be ignored
     fn send_bar_filter(&self) {
+        let all_hidden = self.config.autohide
+            && !self.layer_surfaces.is_empty()
+            && self.layer_surfaces.values().all(|s| s.hidden);
         self.send_wayland_cmd(backend::Cmd::BarFilter {
             edge: self.config.edge,
             size: self.config.size,
@@ -549,7 +555,9 @@ impl App {
                 .iter()
                 .map(|o| (o.handle.clone(), (o.width, o.height)))
                 .collect(),
-            paused: self.settings.window.is_some(),
+            paused: self.settings.window.is_some() || all_hidden,
+            // Preview resolution scaled to the bar size; ~2x covers aspect + hidpi
+            preview_px: (self.config.size * 2).clamp(128, 512),
             clips: self
                 .outputs
                 .iter()
@@ -918,7 +926,12 @@ impl Application for App {
                     WaylandEvent::Output(..)
                     | WaylandEvent::Layer(..)
                     | WaylandEvent::Popup(..)
-                    | WaylandEvent::OverlapNotify(..) => Some(Msg::WaylandEvent(evt)),
+                    // Toplevel overlap events fire for every window; unused
+                    | WaylandEvent::OverlapNotify(
+                        OverlapNotifyEvent::OverlapLayerAdd { .. }
+                        | OverlapNotifyEvent::OverlapLayerRemove { .. },
+                        ..,
+                    ) => Some(Msg::WaylandEvent(evt)),
                     _ => None,
                 }
             }

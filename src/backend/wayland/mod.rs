@@ -43,8 +43,8 @@ use super::{Cmd, Event};
 
 /// Minimum delay between capture requests per workspace, to bound CPU use
 const CAPTURE_INTERVAL: Duration = Duration::from_millis(100);
-/// Maximum backoff when a workspace is idle
-const MAX_CAPTURE_INTERVAL: Duration = Duration::from_millis(2000);
+/// Maximum backoff when a workspace is idle; workspace changes reset it
+const MAX_CAPTURE_INTERVAL: Duration = Duration::from_millis(8000);
 /// Per-channel tolerance when comparing frames; compositor blur behind
 /// translucent surfaces produces per-frame dither noise
 const PIXEL_TOLERANCE: u8 = 6;
@@ -58,6 +58,7 @@ pub struct BarFilter {
     pub size: u32,
     pub outputs: Vec<(wl_output::WlOutput, (i32, i32))>,
     pub paused: bool,
+    pub preview_px: u32,
     pub clips: Vec<(wl_output::WlOutput, [u32; 4])>,
 }
 
@@ -80,6 +81,7 @@ pub fn subscription(conn: Connection) -> iced::Subscription<Event> {
 
 pub struct AppData {
     qh: QueueHandle<Self>,
+    conn: Connection,
     loop_handle: LoopHandle<'static, AppData>,
     registry_state: RegistryState,
     workspace_state: WorkspaceState,
@@ -269,6 +271,7 @@ impl AppData {
                 size,
                 outputs,
                 paused,
+                preview_px,
                 clips,
             } => {
                 let was_paused = self.captures_paused();
@@ -277,6 +280,7 @@ impl AppData {
                     size,
                     outputs,
                     paused,
+                    preview_px,
                     clips,
                 });
                 if paused && !was_paused {
@@ -371,6 +375,7 @@ fn start(conn: Connection) -> mpsc::Receiver<Event> {
         let registry_state = RegistryState::new(&globals);
         let mut app_data = AppData {
             qh: qh.clone(),
+            conn: conn.clone(),
             loop_handle: event_loop.handle(),
             workspace_state: WorkspaceState::new(&registry_state, &qh),
             screencopy_state: ScreencopyState::new(&globals, &qh),

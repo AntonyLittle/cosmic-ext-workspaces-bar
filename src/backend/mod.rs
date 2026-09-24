@@ -38,6 +38,8 @@ pub enum Cmd {
         size: u32,
         outputs: Vec<(wl_output::WlOutput, (i32, i32))>,
         paused: bool,
+        /// Downscale target for preview thumbnails, in pixels
+        preview_px: u32,
         /// Logical clip thickness per edge (top, bottom, left, right) to
         /// crop out of thumbnails, per output
         clips: Vec<(wl_output::WlOutput, [u32; 4])>,
