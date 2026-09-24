@@ -4,7 +4,7 @@ A bar showing live workspace previews for the COSMIC desktop.
 
 ## Requirements
 
-- **COSMIC desktop** (cosmic-comp). The bar relies on COSMIC-specific Wayland   protocols (`ext-workspace`, COSMIC screencopy) and will not work on other compositors.
+- **COSMIC desktop** (cosmic-comp). The bar relies on COSMIC-specific Wayland protocols (`ext-workspace`, COSMIC screencopy) and will not work on other compositors.
 - **Rust** 1.85 or newer (the project uses the 2024 edition). Install via [rustup](https://rustup.rs) if your distribution's toolchain is older.
 - **Build tools and libraries** required by libcosmic:
 
@@ -38,15 +38,6 @@ The first build fetches and compiles libcosmic from git, which takes a while.
 The binary is produced at `target/release/cosmic-ext-workspaces-bar`.
 
 ## Installing
-
-For the current user:
-
-```sh
-install -Dm755 target/release/cosmic-ext-workspaces-bar ~/.local/bin/cosmic-ext-workspaces-bar
-install -Dm644 data/cosmic-ext-workspaces-bar.desktop ~/.local/share/applications/cosmic-ext-workspaces-bar.desktop
-```
-
-Or system-wide:
 
 ```sh
 sudo install -Dm755 target/release/cosmic-ext-workspaces-bar /usr/local/bin/cosmic-ext-workspaces-bar
