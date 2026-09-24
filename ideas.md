@@ -14,5 +14,4 @@ Please plan this.
 
 
 
-
-Previously, you mentioned optimisations that could be implemented. Can we revisit those? And try to think of more?
+When you want to resume, just reference "the dmabuf plan" and I'll pick up from Option B.

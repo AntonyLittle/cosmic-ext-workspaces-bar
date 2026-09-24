@@ -8,13 +8,15 @@ use cosmic::widget::{self, color_picker::ColorPickerUpdate, settings, ColorPicke
 use cosmic::{iced::Task, Element};
 use serde::Serialize;
 
-use crate::config::{Clip, Config, Edge};
+use crate::config::{Clip, Config, Edge, MediaPosition};
 use crate::{App, Msg};
 
 const EDGE_LABELS: &[&str] = &["Top", "Bottom", "Left", "Right"];
 const EDGES: &[Edge] = &[Edge::Top, Edge::Bottom, Edge::Left, Edge::Right];
 const CLIP_LABELS: &[&str] = &["This bar", "All bars", "Nothing"];
 const CLIPS: &[Clip] = &[Clip::OwnBar, Clip::AllBars, Clip::None];
+const MEDIA_POSITION_LABELS: &[&str] = &["Start", "End"];
+const MEDIA_POSITIONS: &[MediaPosition] = &[MediaPosition::Start, MediaPosition::End];
 
 pub struct SettingsState {
     pub window: Option<iced::window::Id>,
@@ -65,6 +67,8 @@ pub enum SettingsMsg {
     Autohide(bool),
     Clip(usize),
     RoundEdgeCorners(bool),
+    MediaEnabled(bool),
+    MediaPosition(usize),
     OverrideBg(bool),
     BgPicker(ColorPickerUpdate),
     OverrideBlur(bool),
@@ -137,6 +141,12 @@ pub fn update(app: &mut App, msg: SettingsMsg) -> Task<cosmic::Action<Msg>> {
             }
         }
         SettingsMsg::RoundEdgeCorners(v) => write(app, "round_edge_corners", v),
+        SettingsMsg::MediaEnabled(v) => write(app, "media_enabled", v),
+        SettingsMsg::MediaPosition(i) => {
+            if let Some(pos) = MEDIA_POSITIONS.get(i) {
+                write(app, "media_position", pos);
+            }
+        }
         SettingsMsg::OverrideBg(custom) => {
             let value = custom.then(|| {
                 to_rgba(
@@ -400,6 +410,24 @@ pub fn view(app: &App) -> Element<'_, Msg> {
                 )),
         );
 
+    let media = settings::section()
+        .title("Media controls")
+        .add(
+            settings::item::builder("Show media controls")
+                .description("Previous/play-pause/next, title and album art for the active player")
+                .toggler(cfg.media_enabled, |v| msg(SettingsMsg::MediaEnabled(v))),
+        )
+        .add_maybe(cfg.media_enabled.then(|| {
+            settings::item(
+                "Position",
+                widget::dropdown(
+                    MEDIA_POSITION_LABELS,
+                    MEDIA_POSITIONS.iter().position(|p| *p == cfg.media_position),
+                    |i| msg(SettingsMsg::MediaPosition(i)),
+                ),
+            )
+        }));
+
     let mut appearance = settings::section()
         .title("Appearance")
         .add(widget::text::caption(
@@ -493,6 +521,7 @@ pub fn view(app: &App) -> Element<'_, Msg> {
             settings::view_column(vec![
                 header.into(),
                 layout.into(),
+                media.into(),
                 appearance.into(),
                 reset.into(),
             ])

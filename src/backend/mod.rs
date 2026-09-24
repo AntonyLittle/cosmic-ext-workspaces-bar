@@ -8,6 +8,7 @@ use cosmic::cctk::wayland_client::protocol::wl_output;
 use std::collections::HashSet;
 
 mod wayland;
+pub mod media;
 pub use cosmic::cctk::wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1::ExtWorkspaceHandleV1;
 pub use cosmic::cctk::workspace::Workspace;
 pub use wayland::subscription;

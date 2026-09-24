@@ -6,7 +6,7 @@ use cosmic::iced::{self, Alignment, Length};
 use cosmic::widget;
 use std::sync::LazyLock;
 
-use crate::config::{Config, Edge, PanelBackground, PanelTheme};
+use crate::config::{Config, Edge, MediaPosition, PanelBackground, PanelTheme};
 use crate::{App, LayerSurface, Msg, Workspace};
 
 pub static RENAME_INPUT_ID: LazyLock<widget::Id> =
@@ -73,6 +73,18 @@ pub fn bar_length(size: u32, edge: Edge, workspaces: usize, output_aspect: f32) 
     (n * item_len + (n - 1.0) * ITEM_SPACING + 2.0 * BAR_PADDING).ceil() as u32
 }
 
+/// Length the media control block adds along the bar's own axis
+pub fn media_block_length(size: u32, edge: Edge) -> u32 {
+    let thickness = preview_thickness(size, edge);
+    if edge.is_vertical() {
+        // Vertical bar: block is a stack (art, text, buttons) contributing height
+        (thickness + 2.0 * CAPTION_HEIGHT + 28.0 + 3.0 * ITEM_INNER_SPACING) as u32
+    } else {
+        // Horizontal bar: block is narrow (its own width is just the art size)
+        (thickness + 2.0 * ITEM_PADDING) as u32
+    }
+}
+
 pub fn bar_view<'a>(
     app: &'a App,
     id: iced::window::Id,
@@ -87,6 +99,15 @@ pub fn bar_view<'a>(
         .iter()
         .filter(|w| w.outputs.contains(&surface.output))
         .map(|w| workspace_item(w, id, edge, thickness, ov));
+
+    let media = app.config.media_enabled.then(|| media_controls(app, thickness)).flatten();
+    let mut items: Vec<cosmic::Element<'_, Msg>> = items.collect();
+    if let Some(media) = media {
+        match app.config.media_position {
+            MediaPosition::Start => items.insert(0, media),
+            MediaPosition::End => items.push(media),
+        }
+    }
 
     let content: cosmic::Element<'_, Msg> = if edge.is_vertical() {
         widget::column::with_children(items)
@@ -213,6 +234,74 @@ fn label_class(ov: &Overrides) -> cosmic::theme::Text {
         Some(c) => cosmic::theme::Text::Color(rgb(c)),
         None => cosmic::theme::Text::Default,
     }
+}
+
+fn media_icon_button(name: &'static str, enabled: bool, msg: Msg) -> cosmic::Element<'static, Msg> {
+    let btn = widget::button::icon(widget::icon::from_name(name)).padding(4.0);
+    if enabled { btn.on_press(msg) } else { btn }.into()
+}
+
+/// Album art + title/artist + previous/play-pause/next, or `None` if no player
+fn media_controls(app: &App, thickness: f32) -> Option<cosmic::Element<'_, Msg>> {
+    use crate::backend::media::{Control, PlaybackStatus};
+
+    let media = app.media.as_ref()?;
+    let art: cosmic::Element<'_, Msg> = match &media.art {
+        Some(handle) => widget::Image::new(handle.clone())
+            .content_fit(iced::ContentFit::Cover)
+            .width(Length::Fixed(thickness))
+            .height(Length::Fixed(thickness))
+            .into(),
+        None => widget::container(widget::icon::from_name("folder-music-symbolic").size(24))
+            .width(Length::Fixed(thickness))
+            .height(Length::Fixed(thickness))
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into(),
+    };
+
+    let title = if media.info.title.is_empty() {
+        "Not playing"
+    } else {
+        media.info.title.as_str()
+    };
+    let text = widget::column::with_capacity(2)
+        .align_x(Alignment::Center)
+        .push(widget::text::caption(title))
+        .push(widget::text::caption(media.info.artist.clone()));
+
+    let play_icon = if media.info.status == PlaybackStatus::Playing {
+        "media-playback-pause-symbolic"
+    } else {
+        "media-playback-start-symbolic"
+    };
+    let buttons = widget::row::with_capacity(3)
+        .spacing(4.0)
+        .push(media_icon_button(
+            "media-skip-backward-symbolic",
+            media.info.can_go_previous,
+            Msg::MediaControl(Control::Previous),
+        ))
+        .push(media_icon_button(
+            play_icon,
+            media.info.can_play_pause,
+            Msg::MediaControl(Control::PlayPause),
+        ))
+        .push(media_icon_button(
+            "media-skip-forward-symbolic",
+            media.info.can_go_next,
+            Msg::MediaControl(Control::Next),
+        ));
+
+    Some(
+        widget::column::with_capacity(3)
+            .spacing(ITEM_INNER_SPACING)
+            .align_x(Alignment::Center)
+            .push(art)
+            .push(text)
+            .push(buttons)
+            .into(),
+    )
 }
 
 fn workspace_item(

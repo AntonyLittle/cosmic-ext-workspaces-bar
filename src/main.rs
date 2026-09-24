@@ -77,6 +77,8 @@ pub enum Msg {
     Settings(settings::SettingsMsg),
     CloseSettings,
     CloseWindow(SurfaceId),
+    Media(backend::media::Event),
+    MediaControl(backend::media::Control),
     Ignore,
 }
 
@@ -141,6 +143,24 @@ pub struct RenameDialog {
     pub value: String,
 }
 
+/// Current MPRIS player snapshot plus any decoded album art
+pub struct MediaState {
+    pub info: backend::media::PlayerState,
+    pub art: Option<cosmic::widget::image::Handle>,
+}
+
+// Decode a small local album art file into an RGBA image handle
+fn load_art(path: &std::path::Path) -> Option<cosmic::widget::image::Handle> {
+    let bytes = std::fs::read(path).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Some(cosmic::widget::image::Handle::from_rgba(
+        w,
+        h,
+        img.into_raw(),
+    ))
+}
+
 /// A layer surface with an exclusive zone, reported by overlap-notify
 #[derive(Clone, Debug)]
 struct Reserved {
@@ -158,6 +178,7 @@ pub struct App {
     pub settings: settings::SettingsState,
     pub context_menu: Option<ContextMenu>,
     pub rename: Option<RenameDialog>,
+    pub media: Option<MediaState>,
     frosted_panel: bool,
     pub layer_surfaces: HashMap<SurfaceId, LayerSurface>,
     // Invisible full-output surfaces used to receive overlap-notify events
@@ -197,6 +218,11 @@ impl App {
             })
             .unwrap_or(16.0 / 9.0);
         let len = view::bar_length(cfg.size, cfg.edge, self.workspaces_on(output), aspect);
+        let len = if cfg.media_enabled && self.media.is_some() {
+            len + view::media_block_length(cfg.size, cfg.edge) + view::ITEM_SPACING as u32
+        } else {
+            len
+        };
         if cfg.edge.is_vertical() {
             Some((Some(cfg.size), Some(len)))
         } else {
@@ -584,6 +610,7 @@ impl Application for App {
             frosted_panel: cosmic::theme::active().cosmic().frosted_panel,
             context_menu: None,
             rename: None,
+            media: None,
             layer_surfaces: HashMap::new(),
             probe_surfaces: HashMap::new(),
             reserved: HashMap::new(),
@@ -887,6 +914,24 @@ impl Application for App {
             Msg::CloseSettings => {
                 return self.close_settings();
             }
+            Msg::Media(backend::media::Event::Player(state)) => {
+                self.media = state.map(|info| {
+                    let art = info.art_path.as_deref().and_then(load_art);
+                    MediaState { info, art }
+                });
+                if self.config.media_enabled {
+                    return self.resize_surfaces();
+                }
+            }
+            Msg::MediaControl(control) => {
+                if let Some(media) = self.media.as_ref() {
+                    let bus_name = media.info.bus_name.clone();
+                    return Task::future(async move {
+                        backend::media::send_control(bus_name, control).await;
+                        cosmic::Action::App(Msg::Ignore)
+                    });
+                }
+            }
             Msg::CloseWindow(id) => {
                 if self.settings.window == Some(id) {
                     return self.close_settings();
@@ -964,6 +1009,9 @@ impl Application for App {
             });
 
         let mut subscriptions = vec![events, config_subscription, panel_theme_subscription];
+        if self.config.media_enabled {
+            subscriptions.push(backend::media::subscription().map(Msg::Media));
+        }
         if let Some(conn) = self.conn.clone() {
             subscriptions.push(backend::subscription(conn).map(Msg::Wayland));
         }

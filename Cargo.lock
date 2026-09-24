@@ -979,12 +979,14 @@ dependencies = [
  "calloop-wayland-source",
  "cosmic-config",
  "env_logger",
+ "image",
  "libcosmic",
  "log",
  "memmap2 0.9.11",
  "rustix 1.1.5",
  "serde",
  "tokio",
+ "zbus",
 ]
 
 [[package]]

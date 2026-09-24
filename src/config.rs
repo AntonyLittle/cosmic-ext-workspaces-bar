@@ -61,6 +61,13 @@ pub enum Clip {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaPosition {
+    #[default]
+    Start,
+    End,
+}
+
 #[derive(Clone, Debug, PartialEq, CosmicConfigEntry)]
 pub struct Config {
     /// Thickness of the bar in logical pixels
@@ -75,6 +82,10 @@ pub struct Config {
     pub round_edge_corners: bool,
     /// Which reserved bar strips to crop out of workspace previews
     pub clip: Clip,
+    /// Show MPRIS media controls (previous/play-pause/next + title/art)
+    pub media_enabled: bool,
+    /// Where the media controls appear along the bar
+    pub media_position: MediaPosition,
     // Theme overrides; `None` = follow the top bar / system theme
     pub bg_color: Option<[f32; 4]>,
     pub blur: Option<bool>,
@@ -95,6 +106,8 @@ impl Default for Config {
             autohide: false,
             round_edge_corners: true,
             clip: Clip::default(),
+            media_enabled: false,
+            media_position: MediaPosition::default(),
             bg_color: None,
             blur: None,
             bar_radius: None,
