@@ -41,7 +41,7 @@ The binary is produced at `target/release/cosmic-ext-workspaces-bar`.
 
 ```sh
 sudo install -Dm755 target/release/cosmic-ext-workspaces-bar /usr/local/bin/cosmic-ext-workspaces-bar
-sudo install -Dm644 data/cosmic-ext-workspaces-bar.desktop /usr/local/share/applications/cosmic-ext-workspaces-bar.desktop
+sudo install -Dm644 data/cosmic-ext-workspaces-bar.desktop ~/.local/share/applications/cosmic-ext-workspaces-bar.desktop
 ```
 
 Make sure the install location is on your `PATH` (the desktop file launches the binary by name).
