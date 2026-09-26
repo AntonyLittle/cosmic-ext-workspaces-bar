@@ -311,6 +311,20 @@ impl AppData {
             Cmd::ActivateToplevelByAppId(app_id) => {
                 self.activate_toplevel_by_app_id(&app_id);
             }
+            Cmd::RefreshCaptures => {
+                // Recreate sessions outright, rather than just resetting the
+                // throttle: a session captured while locked is showing the
+                // lock screen overlay, not stale-but-correct content, and
+                // suspend can otherwise leave a session's protocol state
+                // stuck until the compositor notices and tells us
+                let paused = self.captures_paused();
+                for capture in self.captures.borrow().values() {
+                    capture.stop();
+                    if !paused {
+                        capture.start(&self.screencopy_state, &self.qh);
+                    }
+                }
+            }
         }
     }
 
