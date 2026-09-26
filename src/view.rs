@@ -85,6 +85,40 @@ pub fn media_block_length(size: u32, edge: Edge) -> u32 {
     }
 }
 
+/// Per-corner bar radius: zeroes the two corners touching the screen edge
+/// unless `round_edge_corners` is set. Shared with the corner-radius/blur
+/// compositor hints in main.rs so they always match what's actually painted.
+pub fn effective_bar_radius(
+    edge: Edge,
+    round_edge_corners: bool,
+    bar_radius: Option<u32>,
+    panel_radius: u32,
+) -> iced::border::Radius {
+    let r = bar_radius.unwrap_or(panel_radius) as f32;
+    let mut radius = iced::border::Radius::from(r);
+    if !round_edge_corners {
+        match edge {
+            Edge::Top => {
+                radius.top_left = 0.0;
+                radius.top_right = 0.0;
+            }
+            Edge::Bottom => {
+                radius.bottom_left = 0.0;
+                radius.bottom_right = 0.0;
+            }
+            Edge::Left => {
+                radius.top_left = 0.0;
+                radius.bottom_left = 0.0;
+            }
+            Edge::Right => {
+                radius.top_right = 0.0;
+                radius.bottom_right = 0.0;
+            }
+        }
+    }
+    radius
+}
+
 pub fn bar_view<'a>(
     app: &'a App,
     id: iced::window::Id,
@@ -136,28 +170,7 @@ pub fn bar_view<'a>(
                 .bg_color
                 .map(rgba)
                 .unwrap_or_else(|| panel_bg_color(theme, &panel));
-            let r = ov.bar_radius.unwrap_or(panel.border_radius) as f32;
-            let mut radius = iced::border::Radius::from(r);
-            if !round_edge {
-                match edge {
-                    Edge::Top => {
-                        radius.top_left = 0.0;
-                        radius.top_right = 0.0;
-                    }
-                    Edge::Bottom => {
-                        radius.bottom_left = 0.0;
-                        radius.bottom_right = 0.0;
-                    }
-                    Edge::Left => {
-                        radius.top_left = 0.0;
-                        radius.bottom_left = 0.0;
-                    }
-                    Edge::Right => {
-                        radius.top_right = 0.0;
-                        radius.bottom_right = 0.0;
-                    }
-                }
-            }
+            let radius = effective_bar_radius(edge, round_edge, ov.bar_radius, panel.border_radius);
             cosmic::iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg)),
                 border: iced::Border {

@@ -16,8 +16,11 @@ use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::platform_specific::shell::commands::layer_surface::{
     destroy_layer_surface, get_layer_surface, set_exclusive_zone, set_margin, set_size,
 };
+use cosmic::iced::platform_specific::shell::commands::blur::blur;
+use cosmic::iced::platform_specific::shell::commands::corner_radius::corner_radius;
 use cosmic::iced::platform_specific::shell::commands::overlap_notify::overlap_notify;
 use cosmic::iced::platform_specific::shell::commands::popup::{destroy_popup, get_popup};
+use cosmic::iced::runtime::platform_specific::wayland::CornerRadius;
 use cosmic::iced::runtime::platform_specific::wayland::layer_surface::{
     IcedOutput, SctkLayerSurfaceSettings,
 };
@@ -25,8 +28,9 @@ use cosmic::iced::runtime::platform_specific::wayland::popup::{
     SctkPopupSettings, SctkPositioner,
 };
 use cosmic::iced::window::Id as SurfaceId;
-use cosmic::iced::{self, Subscription, Task};
+use cosmic::iced::{self, Rectangle, Subscription, Task};
 use cosmic::scroll::DiscreteScrollState;
+use cosmic::surface::corner_radius::rounded_rect_strips;
 
 use cctk::sctk::reexports::protocols::xdg::shell::client::xdg_positioner;
 use cctk::sctk::shell::wlr_layer::{Anchor, KeyboardInteractivity, Layer};
@@ -380,7 +384,7 @@ impl App {
             },
             ..Default::default()
         });
-        let mut tasks = vec![surface_task, self.blur_task(id)];
+        let mut tasks = vec![surface_task, self.surface_style_tasks(id)];
         if self.config.autohide {
             tasks.push(self.schedule_hide(id));
         }
@@ -394,16 +398,61 @@ impl App {
             .unwrap_or(self.frosted_panel && self.panel_theme.opacity > 0.001)
     }
 
-    fn blur_task(&self, id: SurfaceId) -> Task<cosmic::Action<Msg>> {
-        if self.blur_enabled() {
-            cosmic::iced::runtime::window::enable_blur(id)
-        } else {
-            cosmic::iced::runtime::window::disable_blur(id)
-        }
+    // Hints the compositor about our actual (rounded) shape, both so
+    // blur-behind is clipped to it instead of the surface's full rectangle
+    // (leaving a "ghost" blur/desktop remnant showing through the corners)
+    // and via the cosmic corner-radius protocol cosmic-panel also uses.
+    fn surface_style_tasks(&self, id: SurfaceId) -> Task<cosmic::Action<Msg>> {
+        let Some(surface) = self.layer_surfaces.get(&id) else {
+            return Task::none();
+        };
+        let (w, h) = self.surface_pixel_size(&surface.output);
+        let radius = view::effective_bar_radius(
+            self.config.edge,
+            self.config.round_edge_corners,
+            self.config.bar_radius,
+            self.panel_theme.border_radius,
+        );
+        let corner_radii = CornerRadius {
+            top_left: radius.top_left as u32,
+            top_right: radius.top_right as u32,
+            bottom_right: radius.bottom_right as u32,
+            bottom_left: radius.bottom_left as u32,
+        };
+        let blur_rects = self.blur_enabled().then(|| {
+            rounded_rect_strips(
+                Rectangle {
+                    x: 0.0,
+                    y: 0.0,
+                    width: w as f32,
+                    height: h as f32,
+                },
+                corner_radii,
+            )
+        });
+        Task::batch([
+            blur(id, blur_rects).map(|_| cosmic::Action::App(Msg::Ignore)),
+            corner_radius(id, Some(corner_radii)).map(|_| cosmic::Action::App(Msg::Ignore)),
+        ])
     }
 
-    fn apply_blur_all(&self) -> Task<cosmic::Action<Msg>> {
-        Task::batch(self.layer_surfaces.keys().map(|id| self.blur_task(*id)))
+    // Resolves the (possibly compositor-decided, i.e. fill-mode) surface
+    // size to concrete pixels, using the output's own size as a stand-in
+    // for whichever dimension is left for the compositor to decide
+    fn surface_pixel_size(&self, output: &wl_output::WlOutput) -> (u32, u32) {
+        let (w, h) = self.surface_size(output).unwrap_or((None, None));
+        let out = self.outputs.iter().find(|o| &o.handle == output);
+        let w = w.unwrap_or_else(|| out.map_or(0, |o| o.width.max(0) as u32));
+        let h = h.unwrap_or_else(|| out.map_or(0, |o| o.height.max(0) as u32));
+        (w, h)
+    }
+
+    fn apply_surface_style_all(&self) -> Task<cosmic::Action<Msg>> {
+        Task::batch(
+            self.layer_surfaces
+                .keys()
+                .map(|id| self.surface_style_tasks(*id)),
+        )
     }
 
     fn hide_surface(&mut self, id: SurfaceId) -> Task<cosmic::Action<Msg>> {
@@ -873,6 +922,8 @@ impl Application for App {
                         || new_config.edge != self.config.edge
                         || new_config.fill != self.config.fill;
                     let blur_changed = new_config.blur != self.config.blur;
+                    let radius_changed = new_config.bar_radius != self.config.bar_radius
+                        || new_config.round_edge_corners != self.config.round_edge_corners;
                     let autohide_changed = new_config.autohide != self.config.autohide;
                     let clip_changed = new_config.clip != self.config.clip;
                     if new_config.preferred_player != self.config.preferred_player {
@@ -885,8 +936,8 @@ impl Application for App {
                         return self.recreate_surfaces();
                     }
                     let mut tasks = Vec::new();
-                    if blur_changed {
-                        tasks.push(self.apply_blur_all());
+                    if blur_changed || radius_changed {
+                        tasks.push(self.apply_surface_style_all());
                     }
                     if autohide_changed {
                         tasks.push(self.apply_autohide_all());
@@ -904,7 +955,7 @@ impl Application for App {
             Msg::PanelTheme(panel_theme) => {
                 if panel_theme != self.panel_theme {
                     self.panel_theme = panel_theme;
-                    return self.apply_blur_all();
+                    return self.apply_surface_style_all();
                 }
             }
             Msg::ActivateWorkspace(workspace_handle) => {
@@ -1182,7 +1233,7 @@ impl Application for App {
         new_theme: &cosmic::cosmic_theme::Theme,
     ) -> Task<cosmic::Action<Msg>> {
         self.frosted_panel = new_theme.frosted_panel;
-        self.apply_blur_all()
+        self.apply_surface_style_all()
     }
 
     fn subscription(&self) -> Subscription<Msg> {
