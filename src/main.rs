@@ -85,6 +85,7 @@ pub enum Msg {
     MediaMarqueeTick,
     MediaVolumeChanged(f64),
     MediaVolumeHideCheck(u64),
+    Power(backend::power::Event),
     Ignore,
 }
 
@@ -1151,6 +1152,9 @@ impl Application for App {
                     media.marquee_offset = media.marquee_offset.wrapping_add(1);
                 }
             }
+            Msg::Power(backend::power::Event::Resumed) => {
+                self.send_wayland_cmd(backend::Cmd::RefreshCaptures);
+            }
             Msg::CloseWindow(id) => {
                 if self.settings.window == Some(id) {
                     return self.close_settings();
@@ -1244,6 +1248,7 @@ impl Application for App {
         if let Some(conn) = self.conn.clone() {
             subscriptions.push(backend::subscription(conn).map(Msg::Wayland));
         }
+        subscriptions.push(backend::power::subscription().map(Msg::Power));
         Subscription::batch(subscriptions)
     }
 
