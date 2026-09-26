@@ -81,6 +81,7 @@ pub enum Msg {
     Settings(settings::SettingsMsg),
     CloseSettings,
     CloseWindow(SurfaceId),
+    ResendSurfaceStyle(SurfaceId),
     Media(backend::media::Event),
     MediaControl(backend::media::Control),
     MediaArtLoaded(backend::media::ArtSource, Option<Vec<u8>>),
@@ -388,6 +389,16 @@ impl App {
         if self.config.autohide {
             tasks.push(self.schedule_hide(id));
         }
+        // libcosmic clamps the corner radius to the layer surface's own
+        // (internally tracked) size, which in fill/stretch mode is still a
+        // 1x1 placeholder until the compositor's first real Configure - if
+        // our request above races ahead of that, it gets silently clamped
+        // to 0. There's no app-visible "configure done" event to wait on, so
+        // just resend shortly after, once the race window has passed.
+        tasks.push(Task::future(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            cosmic::Action::App(Msg::ResendSurfaceStyle(id))
+        }));
         Task::batch(tasks)
     }
 
@@ -1205,6 +1216,9 @@ impl Application for App {
             }
             Msg::Power(backend::power::Event::Resumed) => {
                 self.send_wayland_cmd(backend::Cmd::RefreshCaptures);
+            }
+            Msg::ResendSurfaceStyle(id) => {
+                return self.surface_style_tasks(id);
             }
             Msg::CloseWindow(id) => {
                 if self.settings.window == Some(id) {
